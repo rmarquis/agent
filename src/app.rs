@@ -292,6 +292,10 @@ impl App {
                         Ok(ev) => ev,
                         Err(mpsc::error::TryRecvError::Empty) => break,
                         Err(mpsc::error::TryRecvError::Disconnected) => {
+                            crate::log::entry(crate::log::Level::Warn, "agent_stop", &serde_json::json!({
+                                "reason": "channel_disconnected",
+                                "source": "try_recv_drain",
+                            }));
                             self.finish_agent(agent.take().unwrap(), false).await;
                             break;
                         }
@@ -360,6 +364,11 @@ impl App {
             }
 
             // ── Show deferred dialog once user stops typing ──────────────
+            // If agent was cancelled while a dialog was deferred, discard it.
+            if agent.is_none() && deferred_dialog.is_some() {
+                deferred_dialog.take();
+                self.screen.set_pending_dialog(false);
+            }
             if deferred_dialog.is_some() && active_dialog.is_none() && agent.is_some() {
                 // Auto-approve deferred confirms in Yolo mode.
                 if self.mode == Mode::Yolo {
@@ -712,12 +721,18 @@ impl App {
                 true
             }
             EventOutcome::CancelAgent => {
+                crate::log::entry(crate::log::Level::Info, "agent_stop", &serde_json::json!({
+                    "reason": "user_cancel",
+                }));
                 if let Some(ag) = agent.take() {
                     self.finish_agent(ag, true).await;
                 }
                 false
             }
             EventOutcome::CancelAndClear => {
+                crate::log::entry(crate::log::Level::Info, "agent_stop", &serde_json::json!({
+                    "reason": "user_cancel_and_clear",
+                }));
                 if let Some(ag) = agent.take() {
                     self.finish_agent(ag, true).await;
                 }
@@ -1176,6 +1191,9 @@ impl App {
     async fn finish_agent(&mut self, agent: AgentState, cancelled: bool) {
         self.screen.flush_blocks();
         if cancelled {
+            crate::log::entry(crate::log::Level::Info, "finish_agent", &serde_json::json!({
+                "cancelled": true,
+            }));
             self.screen.set_throbber(render::Throbber::Interrupted);
             let mut leftover: Vec<String> = agent.steering.lock().unwrap().drain(..).collect();
             leftover.append(&mut self.queued_messages);
@@ -1192,8 +1210,23 @@ impl App {
             agent.handle.abort();
         } else {
             self.screen.set_throbber(render::Throbber::Done);
-            if let Ok(new_messages) = agent.handle.await {
-                self.history = new_messages;
+            match agent.handle.await {
+                Ok(new_messages) => {
+                    crate::log::entry(crate::log::Level::Info, "finish_agent", &serde_json::json!({
+                        "cancelled": false,
+                        "result": "ok",
+                        "messages": new_messages.len(),
+                    }));
+                    self.history = new_messages;
+                }
+                Err(e) => {
+                    crate::log::entry(crate::log::Level::Error, "finish_agent", &serde_json::json!({
+                        "cancelled": false,
+                        "result": "join_error",
+                        "panic": e.is_panic(),
+                        "error": e.to_string(),
+                    }));
+                }
             }
         }
         self.save_session();
@@ -1848,6 +1881,10 @@ impl App {
                 false
             }
             ConfirmChoice::No => {
+                crate::log::entry(crate::log::Level::Info, "agent_stop", &serde_json::json!({
+                    "reason": "confirm_denied",
+                    "tool": tool_name,
+                }));
                 let _ = reply.send((false, message));
                 self.screen.finish_tool(ToolStatus::Denied, None);
                 if let Some(ref mut ag) = agent {
@@ -1873,6 +1910,9 @@ impl App {
                 false
             }
             None => {
+                crate::log::entry(crate::log::Level::Info, "agent_stop", &serde_json::json!({
+                    "reason": "question_cancelled",
+                }));
                 let _ = reply.send("User cancelled the question.".into());
                 self.screen.finish_tool(ToolStatus::Denied, None);
                 if let Some(ref mut ag) = agent {
@@ -1989,10 +2029,18 @@ impl App {
 
     fn show_processes(&mut self) {
         let list = self.processes.list();
+        if list.is_empty() {
+            self.screen.push(Block::Error {
+                message: "no background processes".into(),
+            });
+            self.screen.flush_blocks();
+            return;
+        }
         let killed = render::show_ps(&list);
         for id in &killed {
             let _ = self.processes.stop(id);
         }
+        self.screen.redraw(self.screen.has_scrollback);
     }
 
     fn export_to_clipboard(&mut self) {

@@ -31,7 +31,7 @@ impl Tool for WebSearchTool {
 
     fn needs_confirm(&self, args: &HashMap<String, Value>) -> Option<String> {
         let query = str_arg(args, "query");
-        Some(format!("Search: {query}"))
+        Some(query.to_string())
     }
 
     fn execute(&self, args: &HashMap<String, Value>) -> ToolResult {

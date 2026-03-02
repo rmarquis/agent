@@ -563,6 +563,7 @@ impl Screen {
             erase_prompt_at(self.prompt.redraw_row);
             self.prompt.fallback_row = Some(self.prompt.redraw_row);
             self.prompt.drawn = false;
+            self.prompt.dirty = true;
         }
     }
 
@@ -780,7 +781,7 @@ impl Screen {
         draw_start_row: u16,
         pre_prompt_rows: u16,
     ) -> (u16, u16, bool) {
-        let usable = width.saturating_sub(1);
+        let usable = width.saturating_sub(2);
         let height = terminal::size()
             .map(|(_, h)| h as usize)
             .unwrap_or(24)
@@ -1222,6 +1223,7 @@ pub fn tool_arg_summary(name: &str, args: &HashMap<String, serde_json::Value>) -
             }
         }
         "web_fetch" => args.get("url").and_then(|v| v.as_str()).unwrap_or("").into(),
+        "web_search" => args.get("query").and_then(|v| v.as_str()).unwrap_or("").into(),
         "read_process_output" | "stop_process" => {
             args.get("id").and_then(|v| v.as_str()).unwrap_or("").into()
         }

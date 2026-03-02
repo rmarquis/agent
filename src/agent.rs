@@ -147,6 +147,10 @@ pub async fn run_agent(
             {
                 Ok(r) => r,
                 Err(e) => {
+                    log::entry(log::Level::Warn, "agent_stop", &serde_json::json!({
+                        "reason": "llm_error",
+                        "error": e,
+                    }));
                     let _ = tx.send(AgentEvent::Error(e));
                     messages.remove(0);
                     return messages;
@@ -176,6 +180,10 @@ pub async fn run_agent(
         let tool_calls = resp.tool_calls;
 
         if tool_calls.is_empty() {
+            log::entry(log::Level::Info, "agent_stop", &serde_json::json!({
+                "reason": "no_tool_calls",
+                "has_content": content.is_some(),
+            }));
             messages.push(Message {
                 role: Role::Assistant,
                 content,
