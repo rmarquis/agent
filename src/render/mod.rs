@@ -3,8 +3,8 @@ mod dialogs;
 mod highlight;
 
 pub use dialogs::{
-    parse_questions, show_ps, show_resume, show_rewind, ConfirmDialog, Question, QuestionDialog,
-    QuestionOption,
+    parse_questions, ConfirmDialog, PsDialog, Question, QuestionDialog, QuestionOption,
+    ResumeDialog, RewindDialog,
 };
 
 use crate::input::{InputState, MenuKind, PASTE_MARKER};
@@ -59,7 +59,10 @@ pub struct ActiveTool {
 
 impl ActiveTool {
     fn elapsed(&self) -> Option<Duration> {
-        if matches!(self.name.as_str(), "bash" | "web_fetch" | "read_process_output" | "stop_process") {
+        if matches!(
+            self.name.as_str(),
+            "bash" | "web_fetch" | "read_process_output" | "stop_process"
+        ) {
             Some(self.start_time.elapsed())
         } else {
             None
@@ -1135,9 +1138,7 @@ fn render_queued(out: &mut io::Stdout, queued: &[String], usable: usize) -> u16 
                 let _ = out
                     .queue(SetBackgroundColor(theme::USER_BG))
                     .and_then(|o| o.queue(SetAttribute(Attribute::Bold)))
-                    .and_then(|o| {
-                        o.queue(Print(format!(" {}{}", chunk, " ".repeat(trailing))))
-                    })
+                    .and_then(|o| o.queue(Print(format!(" {}{}", chunk, " ".repeat(trailing)))))
                     .and_then(|o| o.queue(SetAttribute(Attribute::Reset)))
                     .and_then(|o| o.queue(ResetColor));
                 crlf(out);
@@ -1222,8 +1223,16 @@ pub fn tool_arg_summary(name: &str, args: &HashMap<String, serde_json::Value>) -
                 None => pattern.into(),
             }
         }
-        "web_fetch" => args.get("url").and_then(|v| v.as_str()).unwrap_or("").into(),
-        "web_search" => args.get("query").and_then(|v| v.as_str()).unwrap_or("").into(),
+        "web_fetch" => args
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .into(),
+        "web_search" => args
+            .get("query")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .into(),
         "read_process_output" | "stop_process" => {
             args.get("id").and_then(|v| v.as_str()).unwrap_or("").into()
         }

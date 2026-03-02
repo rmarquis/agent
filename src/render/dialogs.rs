@@ -1,6 +1,7 @@
 use crate::session;
 use crate::theme;
 use crate::tools::ProcessInfo;
+use crossterm::event::{KeyCode, KeyModifiers};
 use crossterm::{
     cursor,
     style::{Attribute, Print, ResetColor, SetAttribute, SetForegroundColor},
@@ -8,9 +9,6 @@ use crossterm::{
 };
 use std::collections::HashMap;
 use std::io::{self, Write};
-use std::time::Duration;
-
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 
 use super::blocks::wrap_line;
 use super::highlight::{count_inline_diff_rows, print_inline_diff, print_syntax_file};
@@ -669,42 +667,100 @@ impl ConfirmDialog {
     }
 }
 
-/// Show a rewind menu listing user turns. Returns the block index to rewind to.
-pub fn show_rewind(turns: &[(usize, String)]) -> Option<usize> {
-    if turns.is_empty() {
-        return None;
+// ── RewindDialog ─────────────────────────────────────────────────────────────
+
+pub struct RewindDialog {
+    turns: Vec<(usize, String)>,
+    selected: usize,
+    scroll_offset: usize,
+    max_visible: usize,
+    dirty: bool,
+    bar_row: u16,
+    prev_bar_row: u16,
+    pub restore_vim_insert: bool,
+}
+
+impl RewindDialog {
+    pub fn new(turns: Vec<(usize, String)>, restore_vim_insert: bool) -> Self {
+        let (_, height) = terminal::size().unwrap_or((80, 24));
+        let max_visible = (height as usize).saturating_sub(6).min(turns.len());
+        let bar_row = height.saturating_sub((max_visible + 4) as u16);
+        let selected = turns.len().saturating_sub(1);
+        let scroll_offset = turns.len().saturating_sub(max_visible);
+        let mut out = io::stdout();
+        let _ = out.queue(cursor::Hide);
+        let _ = out.flush();
+        Self {
+            turns,
+            selected,
+            scroll_offset,
+            max_visible,
+            dirty: true,
+            bar_row,
+            prev_bar_row: bar_row,
+            restore_vim_insert,
+        }
     }
 
-    let mut out = io::stdout();
-    let (_, height) = terminal::size().unwrap_or((80, 24));
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
 
-    let mut max_visible = (height as usize).saturating_sub(6).min(turns.len());
-    let mut total_rows = (max_visible + 4) as u16;
-    let mut bar_row = height.saturating_sub(total_rows);
-    let mut last_bar_row = bar_row;
-    let mut selected: usize = turns.len() - 1;
-    let mut scroll_offset: usize = turns.len().saturating_sub(max_visible);
+    pub fn handle_resize(&mut self, h: u16) {
+        self.max_visible = (h as usize).saturating_sub(6).min(self.turns.len());
+        self.bar_row = h.saturating_sub((self.max_visible + 4) as u16);
+        self.scroll_offset = self
+            .scroll_offset
+            .min(self.turns.len().saturating_sub(self.max_visible));
+        self.dirty = true;
+    }
 
-    let _ = out.flush();
-    let _ = out.queue(cursor::Hide);
-    let _ = out.flush();
+    /// Returns `Some(Some(idx))` when the user selects an entry, `Some(None)` on cancel.
+    pub fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Option<Option<usize>> {
+        match code {
+            KeyCode::Enter => return Some(Some(self.turns[self.selected].0)),
+            KeyCode::Esc => return Some(None),
+            KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => return Some(None),
+            KeyCode::Up | KeyCode::Char('k') => {
+                if self.selected > 0 {
+                    self.selected -= 1;
+                    if self.selected < self.scroll_offset {
+                        self.scroll_offset = self.selected;
+                    }
+                    self.dirty = true;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if self.selected + 1 < self.turns.len() {
+                    self.selected += 1;
+                    if self.selected >= self.scroll_offset + self.max_visible {
+                        self.scroll_offset = self.selected + 1 - self.max_visible;
+                    }
+                    self.dirty = true;
+                }
+            }
+            _ => {}
+        }
+        None
+    }
 
-    let draw = |bar_row: u16,
-                last_bar_row: u16,
-                max_visible: usize,
-                selected: usize,
-                scroll_offset: usize| {
+    pub fn draw(&mut self) {
+        if !self.dirty {
+            return;
+        }
+        self.dirty = false;
+
         let mut out = io::stdout();
         let (width, _) = terminal::size().unwrap_or((80, 24));
         let w = width as usize;
         let _ = out.queue(terminal::BeginSynchronizedUpdate);
-        let clear_from = bar_row.min(last_bar_row);
+        let _ = out.queue(cursor::Hide);
+        let clear_from = self.bar_row.min(self.prev_bar_row);
         let _ = out.queue(cursor::MoveTo(0, clear_from));
         let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
-        let _ = out.queue(cursor::MoveTo(0, bar_row));
+        let _ = out.queue(cursor::MoveTo(0, self.bar_row));
 
-        let mut row = bar_row;
-
+        let mut row = self.bar_row;
         let _ = out.queue(cursor::MoveTo(0, row));
         let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
         draw_bar(&mut out, w, None, None, theme::ACCENT);
@@ -717,28 +773,22 @@ pub fn show_rewind(turns: &[(usize, String)]) -> Option<usize> {
         let _ = out.queue(SetAttribute(Attribute::Reset));
         row = row.saturating_add(1);
 
-        let end = (scroll_offset + max_visible).min(turns.len());
-        for (i, (_, ref full_text)) in turns.iter().enumerate().take(end).skip(scroll_offset) {
+        let end = (self.scroll_offset + self.max_visible).min(self.turns.len());
+        for (i, (_, ref full_text)) in self
+            .turns
+            .iter()
+            .enumerate()
+            .take(end)
+            .skip(self.scroll_offset)
+        {
             let label = full_text.lines().next().unwrap_or("");
             let num = i + 1;
             let max_label = w.saturating_sub(8);
-            let truncated = if label.chars().count() > max_label {
-                format!(
-                    "{}…",
-                    &label[..label
-                        .char_indices()
-                        .nth(max_label)
-                        .map(|(j, _)| j)
-                        .unwrap_or(label.len())]
-                )
-            } else {
-                label.to_string()
-            };
-
+            let truncated = truncate_str_local(label, max_label);
             let _ = out.queue(cursor::MoveTo(0, row));
             let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
             let _ = out.queue(Print("  "));
-            if i == selected {
+            if i == self.selected {
                 let _ = out.queue(SetAttribute(Attribute::Dim));
                 let _ = out.queue(Print(format!("{}.", num)));
                 let _ = out.queue(SetAttribute(Attribute::Reset));
@@ -758,110 +808,161 @@ pub fn show_rewind(turns: &[(usize, String)]) -> Option<usize> {
         let _ = out.queue(cursor::MoveTo(0, row));
         let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
         row = row.saturating_add(1);
-
         let _ = out.queue(cursor::MoveTo(0, row));
         let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
         let _ = out.queue(SetAttribute(Attribute::Dim));
         let _ = out.queue(Print(" enter: select  esc: cancel"));
         let _ = out.queue(SetAttribute(Attribute::Reset));
         let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
-
         let _ = out.queue(terminal::EndSynchronizedUpdate);
         let _ = out.flush();
-    };
 
-    draw(bar_row, last_bar_row, max_visible, selected, scroll_offset);
-    last_bar_row = bar_row;
-
-    let result = loop {
-        match event::read() {
-            Ok(Event::Resize(_, h)) => {
-                max_visible = (h as usize).saturating_sub(6).min(turns.len());
-                total_rows = (max_visible + 4) as u16;
-                bar_row = h.saturating_sub(total_rows);
-                scroll_offset = scroll_offset.min(turns.len().saturating_sub(max_visible));
-                draw(bar_row, last_bar_row, max_visible, selected, scroll_offset);
-                last_bar_row = bar_row;
-            }
-            Ok(Event::Key(KeyEvent {
-                code, modifiers, ..
-            })) => match (code, modifiers) {
-                (KeyCode::Enter, _) => break Some(turns[selected].0),
-                (KeyCode::Esc, _) => break None,
-                (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => break None,
-                (KeyCode::Up, _) | (KeyCode::Char('k'), _) => {
-                    if selected > 0 {
-                        selected -= 1;
-                        if selected < scroll_offset {
-                            scroll_offset = selected;
-                        }
-                        draw(bar_row, last_bar_row, max_visible, selected, scroll_offset);
-                    }
-                }
-                (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
-                    if selected + 1 < turns.len() {
-                        selected += 1;
-                        if selected >= scroll_offset + max_visible {
-                            scroll_offset = selected + 1 - max_visible;
-                        }
-                        draw(bar_row, last_bar_row, max_visible, selected, scroll_offset);
-                    }
-                }
-                _ => {}
-            },
-            _ => {}
-        }
-    };
-
-    dialog_cleanup(last_bar_row);
-
-    result
-}
-
-/// Show a resume menu listing saved sessions. Returns the selected session id.
-pub fn show_resume(entries: &[ResumeEntry], current_cwd: &str) -> Option<String> {
-    if entries.is_empty() {
-        return None;
+        self.prev_bar_row = self.bar_row;
     }
 
-    let mut out = io::stdout();
-    let (_, mut height) = terminal::size().unwrap_or((80, 24));
+    pub fn cleanup(&self) {
+        dialog_cleanup(self.bar_row);
+    }
+}
 
-    let mut query = String::new();
-    let mut workspace_only = true;
-    let mut filtered = filter_resume_entries(entries, &query, workspace_only, current_cwd);
-    let mut selected: usize = 0;
-    let mut scroll_offset: usize = 0;
+// ── ResumeDialog ──────────────────────────────────────────────────────────────
 
-    // 4 = bar + header + blank + hint; 3 = top breathing room
-    let resume_max_visible =
-        |h: u16, count: usize| -> usize { (h as usize).saturating_sub(7).min(count.max(1)) };
-    let mut max_visible = resume_max_visible(height, filtered.len());
-    let mut bar_row = height.saturating_sub((max_visible + 4) as u16);
-    let mut last_bar_row = bar_row;
+pub struct ResumeDialog {
+    entries: Vec<ResumeEntry>,
+    current_cwd: String,
+    query: String,
+    workspace_only: bool,
+    filtered: Vec<ResumeEntry>,
+    selected: usize,
+    scroll_offset: usize,
+    max_visible: usize,
+    dirty: bool,
+    bar_row: u16,
+    prev_bar_row: u16,
+}
 
-    let _ = out.flush();
-    let _ = out.queue(cursor::Hide);
-    let _ = out.flush();
+impl ResumeDialog {
+    pub fn new(entries: Vec<ResumeEntry>, current_cwd: String) -> Self {
+        let (_, height) = terminal::size().unwrap_or((80, 24));
+        let filtered = filter_resume_entries(&entries, "", true, &current_cwd);
+        let max_visible = (height as usize)
+            .saturating_sub(7)
+            .min(filtered.len().max(1));
+        let bar_row = height.saturating_sub((max_visible + 4) as u16);
+        let mut out = io::stdout();
+        let _ = out.queue(cursor::Hide);
+        let _ = out.flush();
+        Self {
+            entries,
+            current_cwd,
+            query: String::new(),
+            workspace_only: true,
+            filtered,
+            selected: 0,
+            scroll_offset: 0,
+            max_visible,
+            dirty: true,
+            bar_row,
+            prev_bar_row: bar_row,
+        }
+    }
 
-    let draw = |bar_row: u16,
-                last_bar_row: u16,
-                max_visible: usize,
-                selected: usize,
-                scroll_offset: usize,
-                query: &str,
-                workspace_only: bool,
-                filtered: &[ResumeEntry]| {
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    fn recalculate_layout(&mut self, height: u16) {
+        self.filtered = filter_resume_entries(
+            &self.entries,
+            &self.query,
+            self.workspace_only,
+            &self.current_cwd,
+        );
+        self.max_visible = (height as usize)
+            .saturating_sub(7)
+            .min(self.filtered.len().max(1));
+        self.bar_row = height.saturating_sub((self.max_visible + 4) as u16);
+        if self.filtered.is_empty() {
+            self.selected = 0;
+            self.scroll_offset = 0;
+        } else {
+            self.selected = self.selected.min(self.filtered.len().saturating_sub(1));
+            self.scroll_offset = self
+                .scroll_offset
+                .min(self.filtered.len().saturating_sub(self.max_visible));
+        }
+        self.dirty = true;
+    }
+
+    pub fn handle_resize(&mut self, h: u16) {
+        self.recalculate_layout(h);
+    }
+
+    /// Returns `Some(Some(id))` on selection, `Some(None)` on cancel.
+    pub fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Option<Option<String>> {
+        let (_, height) = terminal::size().unwrap_or((80, 24));
+        match (code, mods) {
+            (KeyCode::Enter, _) => {
+                return Some(self.filtered.get(self.selected).map(|e| e.id.clone()));
+            }
+            (KeyCode::Esc, _) => return Some(None),
+            (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => return Some(None),
+            (KeyCode::Char('w'), m) if m.contains(KeyModifiers::CONTROL) => {
+                self.workspace_only = !self.workspace_only;
+                self.recalculate_layout(height);
+            }
+            (KeyCode::Char('u'), m) if m.contains(KeyModifiers::CONTROL) => {
+                self.query.clear();
+                self.recalculate_layout(height);
+            }
+            (KeyCode::Backspace, _) => {
+                self.query.pop();
+                self.recalculate_layout(height);
+            }
+            (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                if self.selected > 0 {
+                    self.selected -= 1;
+                    if self.selected < self.scroll_offset {
+                        self.scroll_offset = self.selected;
+                    }
+                    self.dirty = true;
+                }
+            }
+            (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                if self.selected + 1 < self.filtered.len() {
+                    self.selected += 1;
+                    if self.selected >= self.scroll_offset + self.max_visible {
+                        self.scroll_offset = self.selected + 1 - self.max_visible;
+                    }
+                    self.dirty = true;
+                }
+            }
+            (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                self.query.push(c);
+                self.recalculate_layout(height);
+            }
+            _ => {}
+        }
+        None
+    }
+
+    pub fn draw(&mut self) {
+        if !self.dirty {
+            return;
+        }
+        self.dirty = false;
+
         let mut out = io::stdout();
         let (width, _) = terminal::size().unwrap_or((80, 24));
         let w = width as usize;
         let _ = out.queue(terminal::BeginSynchronizedUpdate);
-        let clear_from = bar_row.min(last_bar_row);
+        let _ = out.queue(cursor::Hide);
+        let clear_from = self.bar_row.min(self.prev_bar_row);
         let _ = out.queue(cursor::MoveTo(0, clear_from));
         let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
-        let _ = out.queue(cursor::MoveTo(0, bar_row));
+        let _ = out.queue(cursor::MoveTo(0, self.bar_row));
 
-        let mut row = bar_row;
+        let mut row = self.bar_row;
         let now_ms = session::now_ms();
 
         let _ = out.queue(cursor::MoveTo(0, row));
@@ -872,17 +973,17 @@ pub fn show_resume(entries: &[ResumeEntry], current_cwd: &str) -> Option<String>
         let _ = out.queue(cursor::MoveTo(0, row));
         let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
         let _ = out.queue(SetAttribute(Attribute::Dim));
-        if workspace_only {
+        if self.workspace_only {
             let _ = out.queue(Print(" Resume (workspace):"));
         } else {
             let _ = out.queue(Print(" Resume (all):"));
         }
         let _ = out.queue(SetAttribute(Attribute::Reset));
         let _ = out.queue(Print(" "));
-        let _ = out.queue(Print(query));
+        let _ = out.queue(Print(&self.query));
         row = row.saturating_add(1);
 
-        if filtered.is_empty() {
+        if self.filtered.is_empty() {
             let _ = out.queue(cursor::MoveTo(0, row));
             let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
             let _ = out.queue(SetAttribute(Attribute::Dim));
@@ -890,18 +991,22 @@ pub fn show_resume(entries: &[ResumeEntry], current_cwd: &str) -> Option<String>
             let _ = out.queue(SetAttribute(Attribute::Reset));
             row = row.saturating_add(1);
         } else {
-            let end = (scroll_offset + max_visible).min(filtered.len());
-            for (i, entry) in filtered.iter().enumerate().take(end).skip(scroll_offset) {
+            let end = (self.scroll_offset + self.max_visible).min(self.filtered.len());
+            for (i, entry) in self
+                .filtered
+                .iter()
+                .enumerate()
+                .take(end)
+                .skip(self.scroll_offset)
+            {
                 let title = resume_title(entry);
                 let time_ago = session::time_ago(resume_ts(entry), now_ms);
                 let time_len = time_ago.chars().count() + 1;
-                let prefix_len = 4;
-                let max_label = w.saturating_sub(time_len + prefix_len);
+                let max_label = w.saturating_sub(time_len + 4);
                 let truncated = truncate_str_local(&title, max_label);
-
                 let _ = out.queue(cursor::MoveTo(0, row));
                 let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
-                if i == selected {
+                if i == self.selected {
                     let _ = out.queue(Print("  "));
                     let _ = out.queue(SetForegroundColor(theme::ACCENT));
                     let _ = out.queue(Print(&truncated));
@@ -910,7 +1015,6 @@ pub fn show_resume(entries: &[ResumeEntry], current_cwd: &str) -> Option<String>
                     let _ = out.queue(Print("  "));
                     let _ = out.queue(Print(&truncated));
                 }
-
                 let _ = out.queue(Print(" "));
                 let _ = out.queue(SetAttribute(Attribute::Dim));
                 let _ = out.queue(Print(&time_ago));
@@ -922,11 +1026,10 @@ pub fn show_resume(entries: &[ResumeEntry], current_cwd: &str) -> Option<String>
         let _ = out.queue(cursor::MoveTo(0, row));
         let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
         row = row.saturating_add(1);
-
         let _ = out.queue(cursor::MoveTo(0, row));
         let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
         let _ = out.queue(SetAttribute(Attribute::Dim));
-        if workspace_only {
+        if self.workspace_only {
             let _ = out.queue(Print(
                 " enter: select  esc: cancel  ctrl+w: all sessions  type to filter",
             ));
@@ -937,162 +1040,138 @@ pub fn show_resume(entries: &[ResumeEntry], current_cwd: &str) -> Option<String>
         }
         let _ = out.queue(SetAttribute(Attribute::Reset));
         let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
-
         let _ = out.queue(terminal::EndSynchronizedUpdate);
         let _ = out.flush();
-    };
 
-    draw(
-        bar_row,
-        last_bar_row,
-        max_visible,
-        selected,
-        scroll_offset,
-        &query,
-        workspace_only,
-        &filtered,
-    );
-    last_bar_row = bar_row;
-
-    terminal::enable_raw_mode().ok();
-    let _ = out.flush();
-
-    let result = loop {
-        let has_event = event::poll(Duration::from_millis(500)).unwrap_or(false);
-        if has_event {
-            match event::read() {
-                Ok(Event::Resize(_, h)) => {
-                    height = h;
-                    max_visible = resume_max_visible(height, filtered.len());
-                    bar_row = height.saturating_sub((max_visible + 4) as u16);
-                    if filtered.is_empty() {
-                        selected = 0;
-                        scroll_offset = 0;
-                    } else {
-                        selected = selected.min(filtered.len().saturating_sub(1));
-                        scroll_offset =
-                            scroll_offset.min(filtered.len().saturating_sub(max_visible));
-                    }
-                }
-                Ok(Event::Key(KeyEvent {
-                    code, modifiers, ..
-                })) => {
-                    match (code, modifiers) {
-                        (KeyCode::Enter, _) => {
-                            if let Some(entry) = filtered.get(selected) {
-                                break Some(entry.id.clone());
-                            }
-                        }
-                        (KeyCode::Esc, _) => break None,
-                        (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => break None,
-                        (KeyCode::Char('w'), m) if m.contains(KeyModifiers::CONTROL) => {
-                            workspace_only = !workspace_only;
-                        }
-                        (KeyCode::Char('u'), m) if m.contains(KeyModifiers::CONTROL) => {
-                            query.clear();
-                        }
-                        (KeyCode::Backspace, _) => {
-                            query.pop();
-                        }
-                        (KeyCode::Up, _) | (KeyCode::Char('k'), _) => {
-                            if selected > 0 {
-                                selected -= 1;
-                                if selected < scroll_offset {
-                                    scroll_offset = selected;
-                                }
-                            }
-                        }
-                        (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
-                            if selected + 1 < filtered.len() {
-                                selected += 1;
-                                if selected >= scroll_offset + max_visible {
-                                    scroll_offset = selected + 1 - max_visible;
-                                }
-                            }
-                        }
-                        (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
-                            query.push(c);
-                        }
-                        _ => {}
-                    }
-
-                    filtered = filter_resume_entries(entries, &query, workspace_only, current_cwd);
-                    max_visible = resume_max_visible(height, filtered.len());
-                    bar_row = height.saturating_sub((max_visible + 4) as u16);
-                    if filtered.is_empty() {
-                        selected = 0;
-                        scroll_offset = 0;
-                    } else {
-                        selected = selected.min(filtered.len().saturating_sub(1));
-                        scroll_offset =
-                            scroll_offset.min(filtered.len().saturating_sub(max_visible));
-                    }
-                }
-                _ => {}
-            }
-        }
-        draw(
-            bar_row,
-            last_bar_row,
-            max_visible,
-            selected,
-            scroll_offset,
-            &query,
-            workspace_only,
-            &filtered,
-        );
-        last_bar_row = bar_row;
-    };
-
-    dialog_cleanup(last_bar_row);
-
-    result
-}
-
-// ── Process list dialog ──────────────────────────────────────────────────────
-
-/// Returns the IDs of processes the user chose to kill (via `k`), or empty vec.
-pub fn show_ps(procs: &[ProcessInfo]) -> Vec<String> {
-    if procs.is_empty() {
-        return vec![];
+        self.prev_bar_row = self.bar_row;
     }
 
-    let mut out = io::stdout();
-    let (_, mut height) = terminal::size().unwrap_or((80, 24));
+    pub fn cleanup(&self) {
+        dialog_cleanup(self.bar_row);
+    }
+}
 
-    let mut selected: usize = 0;
-    let mut killed: Vec<String> = Vec::new();
-    let mut live: Vec<&ProcessInfo> = procs.iter().collect();
+// ── PsDialog ──────────────────────────────────────────────────────────────────
 
-    // 4 = bar + header + blank + hint
-    let max_vis =
-        |h: u16, count: usize| -> usize { (h as usize).saturating_sub(7).min(count.max(1)) };
-    let mut max_visible = max_vis(height, live.len());
-    let mut scroll_offset: usize = 0;
-    let mut bar_row = height.saturating_sub((max_visible + 4) as u16);
-    let mut last_bar_row = bar_row;
+pub struct PsDialog {
+    procs: Vec<ProcessInfo>,
+    selected: usize,
+    scroll_offset: usize,
+    max_visible: usize,
+    dirty: bool,
+    bar_row: u16,
+    prev_bar_row: u16,
+    killed: Vec<String>,
+}
 
-    let _ = out.queue(cursor::Hide);
-    let _ = out.flush();
+impl PsDialog {
+    pub fn new(procs: Vec<ProcessInfo>) -> Self {
+        let (_, height) = terminal::size().unwrap_or((80, 24));
+        let max_visible = (height as usize).saturating_sub(7).min(procs.len().max(1));
+        let bar_row = height.saturating_sub((max_visible + 4) as u16);
+        let mut out = io::stdout();
+        let _ = out.queue(cursor::Hide);
+        let _ = out.flush();
+        Self {
+            procs,
+            selected: 0,
+            scroll_offset: 0,
+            max_visible,
+            dirty: true,
+            bar_row,
+            prev_bar_row: bar_row,
+            killed: Vec::new(),
+        }
+    }
 
-    let draw = |bar_row: u16,
-                last_bar_row: u16,
-                max_visible: usize,
-                selected: usize,
-                scroll_offset: usize,
-                live: &[&ProcessInfo]| {
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    pub fn handle_resize(&mut self, h: u16) {
+        self.max_visible = (h as usize).saturating_sub(7).min(self.procs.len().max(1));
+        self.bar_row = h.saturating_sub((self.max_visible + 4) as u16);
+        if self.procs.is_empty() {
+            self.selected = 0;
+            self.scroll_offset = 0;
+        } else {
+            self.selected = self.selected.min(self.procs.len().saturating_sub(1));
+            self.scroll_offset = self
+                .scroll_offset
+                .min(self.procs.len().saturating_sub(self.max_visible));
+        }
+        self.dirty = true;
+    }
+
+    /// Returns `Some(killed_ids)` when the user closes the dialog (may be empty).
+    pub fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Option<Vec<String>> {
+        match (code, mods) {
+            (KeyCode::Esc, _) => return Some(self.killed.clone()),
+            (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
+                return Some(self.killed.clone())
+            }
+            (KeyCode::Up, _) => {
+                if self.selected > 0 {
+                    self.selected -= 1;
+                    if self.selected < self.scroll_offset {
+                        self.scroll_offset = self.selected;
+                    }
+                    self.dirty = true;
+                }
+            }
+            (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                if self.selected + 1 < self.procs.len() {
+                    self.selected += 1;
+                    if self.selected >= self.scroll_offset + self.max_visible {
+                        self.scroll_offset = self.selected + 1 - self.max_visible;
+                    }
+                    self.dirty = true;
+                }
+            }
+            (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                if let Some(p) = self.procs.get(self.selected) {
+                    if p.running {
+                        self.killed.push(p.id.clone());
+                        self.procs.remove(self.selected);
+                        if !self.procs.is_empty() {
+                            self.selected = self.selected.min(self.procs.len().saturating_sub(1));
+                        } else {
+                            self.selected = 0;
+                        }
+                        self.max_visible = {
+                            let (_, h) = terminal::size().unwrap_or((80, 24));
+                            (h as usize).saturating_sub(7).min(self.procs.len().max(1))
+                        };
+                        self.bar_row = {
+                            let (_, h) = terminal::size().unwrap_or((80, 24));
+                            h.saturating_sub((self.max_visible + 4) as u16)
+                        };
+                        self.dirty = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+
+    pub fn draw(&mut self) {
+        if !self.dirty {
+            return;
+        }
+        self.dirty = false;
+
         let mut out = io::stdout();
         let (width, _) = terminal::size().unwrap_or((80, 24));
         let w = width as usize;
         let _ = out.queue(terminal::BeginSynchronizedUpdate);
-        let clear_from = bar_row.min(last_bar_row);
+        let _ = out.queue(cursor::Hide);
+        let clear_from = self.bar_row.min(self.prev_bar_row);
         let _ = out.queue(cursor::MoveTo(0, clear_from));
         let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
-        let _ = out.queue(cursor::MoveTo(0, bar_row));
+        let _ = out.queue(cursor::MoveTo(0, self.bar_row));
 
-        let mut row = bar_row;
-
-        let _ = out.queue(cursor::MoveTo(0, row));
+        let mut row = self.bar_row;
         draw_bar(&mut out, w, None, None, theme::ACCENT);
         row = row.saturating_add(1);
 
@@ -1102,18 +1181,23 @@ pub fn show_ps(procs: &[ProcessInfo]) -> Vec<String> {
         let _ = out.queue(SetAttribute(Attribute::Reset));
         row = row.saturating_add(1);
 
-        if live.is_empty() {
+        if self.procs.is_empty() {
             let _ = out.queue(cursor::MoveTo(0, row));
             let _ = out.queue(SetAttribute(Attribute::Dim));
             let _ = out.queue(Print("  No processes"));
             let _ = out.queue(SetAttribute(Attribute::Reset));
             row = row.saturating_add(1);
         } else {
-            let end = (scroll_offset + max_visible).min(live.len());
-            for (i, proc) in live.iter().enumerate().take(end).skip(scroll_offset) {
+            let end = (self.scroll_offset + self.max_visible).min(self.procs.len());
+            for (i, proc) in self
+                .procs
+                .iter()
+                .enumerate()
+                .take(end)
+                .skip(self.scroll_offset)
+            {
                 let _ = out.queue(cursor::MoveTo(0, row));
                 let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
-
                 let status = if proc.running { "running" } else { "done" };
                 let elapsed_secs = proc.elapsed.as_secs();
                 let time = if elapsed_secs >= 60 {
@@ -1121,15 +1205,11 @@ pub fn show_ps(procs: &[ProcessInfo]) -> Vec<String> {
                 } else {
                     format!("{}s", elapsed_secs)
                 };
-
-                // Truncate command to fit
                 let meta = format!(" {} {} {}", status, time, proc.id);
                 let meta_len = meta.chars().count() + 1;
-                let prefix_len = 4;
-                let max_cmd = w.saturating_sub(meta_len + prefix_len);
+                let max_cmd = w.saturating_sub(meta_len + 4);
                 let cmd_display = truncate_str_local(&proc.command, max_cmd);
-
-                if i == selected {
+                if i == self.selected {
                     let _ = out.queue(Print("  "));
                     let _ = out.queue(SetForegroundColor(theme::ACCENT));
                     let _ = out.queue(Print(&cmd_display));
@@ -1138,7 +1218,6 @@ pub fn show_ps(procs: &[ProcessInfo]) -> Vec<String> {
                     let _ = out.queue(Print("  "));
                     let _ = out.queue(Print(&cmd_display));
                 }
-
                 let _ = out.queue(Print(" "));
                 let _ = out.queue(SetAttribute(Attribute::Dim));
                 if proc.running {
@@ -1154,117 +1233,24 @@ pub fn show_ps(procs: &[ProcessInfo]) -> Vec<String> {
             }
         }
 
-        // Blank line
         let _ = out.queue(cursor::MoveTo(0, row));
         let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
         row = row.saturating_add(1);
-
-        // Hint line
         let _ = out.queue(cursor::MoveTo(0, row));
         let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
         let _ = out.queue(SetAttribute(Attribute::Dim));
         let _ = out.queue(Print(" esc: close  k: kill selected"));
         let _ = out.queue(SetAttribute(Attribute::Reset));
         let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
-
         let _ = out.queue(terminal::EndSynchronizedUpdate);
         let _ = out.flush();
-    };
 
-    draw(
-        bar_row,
-        last_bar_row,
-        max_visible,
-        selected,
-        scroll_offset,
-        &live,
-    );
-    last_bar_row = bar_row;
-
-    terminal::enable_raw_mode().ok();
-    let _ = out.flush();
-
-    loop {
-        let has_event = event::poll(Duration::from_millis(500)).unwrap_or(false);
-        if has_event {
-            match event::read() {
-                Ok(Event::Resize(_, h)) => {
-                    height = h;
-                    max_visible = max_vis(height, live.len());
-                    bar_row = height.saturating_sub((max_visible + 4) as u16);
-                    if live.is_empty() {
-                        selected = 0;
-                        scroll_offset = 0;
-                    } else {
-                        selected = selected.min(live.len().saturating_sub(1));
-                        scroll_offset =
-                            scroll_offset.min(live.len().saturating_sub(max_visible));
-                    }
-                }
-                Ok(Event::Key(KeyEvent {
-                    code, modifiers, ..
-                })) => {
-                    match (code, modifiers) {
-                        (KeyCode::Esc, _) => {
-                            break;
-                        }
-                        (KeyCode::Char('c'), m)
-                            if m.contains(KeyModifiers::CONTROL) =>
-                        {
-                            break;
-                        }
-                        (KeyCode::Up, _) => {
-                            if selected > 0 {
-                                selected -= 1;
-                                if selected < scroll_offset {
-                                    scroll_offset = selected;
-                                }
-                            }
-                        }
-                        (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
-                            if selected + 1 < live.len() {
-                                selected += 1;
-                                if selected >= scroll_offset + max_visible {
-                                    scroll_offset = selected + 1 - max_visible;
-                                }
-                            }
-                        }
-                        (KeyCode::Char('k'), KeyModifiers::NONE) => {
-                            if let Some(p) = live.get(selected) {
-                                if p.running {
-                                    killed.push(p.id.clone());
-                                    live.remove(selected);
-                                    if !live.is_empty() {
-                                        selected = selected.min(live.len().saturating_sub(1));
-                                    } else {
-                                        selected = 0;
-                                    }
-                                    max_visible = max_vis(height, live.len());
-                                    bar_row =
-                                        height.saturating_sub((max_visible + 4) as u16);
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                _ => {}
-            }
-        }
-        draw(
-            bar_row,
-            last_bar_row,
-            max_visible,
-            selected,
-            scroll_offset,
-            &live,
-        );
-        last_bar_row = bar_row;
+        self.prev_bar_row = self.bar_row;
     }
 
-    dialog_cleanup(last_bar_row);
-
-    killed
+    pub fn cleanup(&self) {
+        dialog_cleanup(self.bar_row);
+    }
 }
 
 /// Non-blocking question dialog state machine.

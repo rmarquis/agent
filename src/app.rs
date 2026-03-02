@@ -73,33 +73,26 @@ enum EventOutcome {
     CancelAndClear,
     Submit(String),
     MenuResult(MenuResult),
-    Rewind(usize),
+    OpenDialog(Box<ActiveDialog>),
 }
 
-enum RunningCommandResult {
-    Executed,
-    Blocked(String),
+enum CommandAction {
+    Continue,
     Quit,
-    Cancel,
-    NotACommand,
+    CancelAndClear,
+    Compact,
+    OpenDialog(Box<ActiveDialog>),
 }
 
-/// Classify input for when the agent is running. Pure function, no side effects.
-fn classify_running_command(input: &str) -> RunningCommandResult {
+/// Check whether a command is allowed while the agent is running.
+/// Returns `Err(reason)` for commands that are blocked.
+fn is_allowed_while_running(input: &str) -> Result<(), String> {
     match input {
-        "/vim" | "/export" | "/ps" => RunningCommandResult::Executed,
-        "/exit" | "/quit" => RunningCommandResult::Quit,
-        "/clear" | "/new" => RunningCommandResult::Cancel,
-        "/compact" => RunningCommandResult::Blocked("cannot compact while agent is working".into()),
-        "/resume" => RunningCommandResult::Blocked("cannot resume while agent is working".into()),
-        "/settings" => {
-            RunningCommandResult::Blocked("cannot open settings while agent is working".into())
-        }
-        "/model" => {
-            RunningCommandResult::Blocked("cannot switch model while agent is working".into())
-        }
-        _ if input.starts_with('!') => RunningCommandResult::Executed,
-        _ => RunningCommandResult::NotACommand,
+        "/compact" => Err("cannot compact while agent is working".into()),
+        "/resume" => Err("cannot resume while agent is working".into()),
+        "/settings" => Err("cannot open settings while agent is working".into()),
+        "/model" => Err("cannot switch model while agent is working".into()),
+        _ => Ok(()),
     }
 }
 
@@ -123,6 +116,7 @@ enum InputOutcome {
     StartAgent,
     Compact,
     Quit,
+    OpenDialog(Box<ActiveDialog>),
 }
 
 /// Mutable timer state shared across event handlers.
@@ -147,6 +141,9 @@ enum ActiveDialog {
         dialog: QuestionDialog,
         reply: tokio::sync::oneshot::Sender<String>,
     },
+    Ps(render::PsDialog),
+    Rewind(render::RewindDialog),
+    Resume(render::ResumeDialog),
 }
 
 /// A permission dialog deferred because the user was actively typing.
@@ -242,13 +239,17 @@ impl App {
         // Dummy receiver — replaced with the real one each time an agent starts.
         let mut agent_rx: mpsc::UnboundedReceiver<AgentEvent> = mpsc::unbounded_channel().1;
 
+        let mut active_dialog: Option<ActiveDialog> = None;
+
         // Auto-submit initial message if provided (e.g. `agent "fix the bug"`).
         if let Some(msg) = initial_message {
             let trimmed = msg.trim();
             if let Some(cmd) = trimmed.strip_prefix('!') {
                 self.run_shell_escape(cmd);
             } else if trimmed == "/resume" {
-                self.resume_session();
+                if let CommandAction::OpenDialog(dlg) = self.handle_command(trimmed) {
+                    active_dialog = Some(*dlg);
+                }
             } else if trimmed == "/settings" {
                 self.input
                     .open_settings(self.input.vim_enabled(), self.auto_compact);
@@ -273,7 +274,6 @@ impl App {
             last_keypress: None,
         };
         let mut deferred_dialog: Option<DeferredDialog> = None;
-        let mut active_dialog: Option<ActiveDialog> = None;
 
         'main: loop {
             // ── Background polls ─────────────────────────────────────────
@@ -292,10 +292,14 @@ impl App {
                         Ok(ev) => ev,
                         Err(mpsc::error::TryRecvError::Empty) => break,
                         Err(mpsc::error::TryRecvError::Disconnected) => {
-                            crate::log::entry(crate::log::Level::Warn, "agent_stop", &serde_json::json!({
-                                "reason": "channel_disconnected",
-                                "source": "try_recv_drain",
-                            }));
+                            crate::log::entry(
+                                crate::log::Level::Warn,
+                                "agent_stop",
+                                &serde_json::json!({
+                                    "reason": "channel_disconnected",
+                                    "source": "try_recv_drain",
+                                }),
+                            );
                             self.finish_agent(agent.take().unwrap(), false).await;
                             break;
                         }
@@ -359,6 +363,9 @@ impl App {
                             }
                         }
                         InputOutcome::Continue | InputOutcome::Quit => {}
+                        InputOutcome::OpenDialog(dlg) => {
+                            active_dialog = Some(*dlg);
+                        }
                     }
                 }
             }
@@ -664,6 +671,18 @@ impl App {
                         dialog.mark_dirty();
                         dialog.draw();
                     }
+                    ActiveDialog::Ps(d) => {
+                        d.handle_resize(h);
+                        d.draw();
+                    }
+                    ActiveDialog::Rewind(d) => {
+                        d.handle_resize(h);
+                        d.draw();
+                    }
+                    ActiveDialog::Resume(d) => {
+                        d.handle_resize(h);
+                        d.draw();
+                    }
                 }
                 return false;
             }
@@ -671,34 +690,90 @@ impl App {
                 code, modifiers, ..
             }) = ev
             {
-                let result = match active_dialog.as_mut().unwrap() {
-                    ActiveDialog::Confirm { dialog, .. } => dialog
-                        .handle_key(code, modifiers)
-                        .map(|(c, m)| DialogOutcome::Confirm(c, m)),
-                    ActiveDialog::AskQuestion { dialog, .. } => dialog
-                        .handle_key(code, modifiers)
-                        .map(DialogOutcome::Question),
-                };
-                if let Some(outcome) = result {
-                    let dlg = active_dialog.take().unwrap();
-                    let should_cancel = match dlg {
-                        ActiveDialog::Confirm {
-                            dialog,
-                            tool_name,
-                            reply,
-                        } => {
-                            dialog.cleanup();
-                            self.resolve_confirm(outcome.into_confirm(), reply, &tool_name, agent)
+                match active_dialog.take().unwrap() {
+                    ActiveDialog::Ps(mut d) => {
+                        if let Some(killed) = d.handle_key(code, modifiers) {
+                            d.cleanup();
+                            for id in &killed {
+                                let _ = self.processes.stop(id);
+                            }
+                            self.screen.redraw(self.screen.has_scrollback);
+                        } else {
+                            *active_dialog = Some(ActiveDialog::Ps(d));
                         }
-                        ActiveDialog::AskQuestion { dialog, reply } => {
-                            dialog.cleanup();
-                            self.resolve_question(outcome.into_question(), reply, agent)
+                        return false;
+                    }
+                    ActiveDialog::Rewind(mut d) => {
+                        let restore = d.restore_vim_insert;
+                        if let Some(maybe_idx) = d.handle_key(code, modifiers) {
+                            d.cleanup();
+                            if let Some(idx) = maybe_idx {
+                                if let Some(text) = self.rewind_to(idx) {
+                                    self.input.buf = text;
+                                    self.input.cpos = self.input.buf.len();
+                                }
+                            } else if restore {
+                                self.input.set_vim_mode(vim::ViMode::Insert);
+                            }
+                            self.screen.redraw(self.screen.has_scrollback);
+                        } else {
+                            *active_dialog = Some(ActiveDialog::Rewind(d));
                         }
-                    };
-                    self.screen.redraw(self.screen.has_scrollback);
-                    if should_cancel {
-                        if let Some(ag) = agent.take() {
-                            self.finish_agent(ag, true).await;
+                        return false;
+                    }
+                    ActiveDialog::Resume(mut d) => {
+                        if let Some(maybe_id) = d.handle_key(code, modifiers) {
+                            d.cleanup();
+                            if let Some(id) = maybe_id {
+                                if let Some(loaded) = session::load(&id) {
+                                    self.load_session(loaded);
+                                    self.rebuild_screen_from_history();
+                                    self.screen.flush_blocks();
+                                }
+                            }
+                            self.screen.redraw(self.screen.has_scrollback);
+                        } else {
+                            *active_dialog = Some(ActiveDialog::Resume(d));
+                        }
+                        return false;
+                    }
+                    ActiveDialog::Confirm {
+                        mut dialog,
+                        tool_name,
+                        reply,
+                    } => {
+                        if let Some((choice, message)) = dialog.handle_key(code, modifiers) {
+                            dialog.cleanup();
+                            let should_cancel =
+                                self.resolve_confirm((choice, message), reply, &tool_name, agent);
+                            self.screen.redraw(self.screen.has_scrollback);
+                            if should_cancel {
+                                if let Some(ag) = agent.take() {
+                                    self.finish_agent(ag, true).await;
+                                }
+                            }
+                        } else {
+                            *active_dialog = Some(ActiveDialog::Confirm {
+                                dialog,
+                                tool_name,
+                                reply,
+                            });
+                        }
+                    }
+                    ActiveDialog::AskQuestion {
+                        mut dialog, reply, ..
+                    } => {
+                        if let Some(answer) = dialog.handle_key(code, modifiers) {
+                            dialog.cleanup();
+                            let should_cancel = self.resolve_question(answer, reply, agent);
+                            self.screen.redraw(self.screen.has_scrollback);
+                            if should_cancel {
+                                if let Some(ag) = agent.take() {
+                                    self.finish_agent(ag, true).await;
+                                }
+                            }
+                        } else {
+                            *active_dialog = Some(ActiveDialog::AskQuestion { dialog, reply });
                         }
                     }
                 }
@@ -721,18 +796,26 @@ impl App {
                 true
             }
             EventOutcome::CancelAgent => {
-                crate::log::entry(crate::log::Level::Info, "agent_stop", &serde_json::json!({
-                    "reason": "user_cancel",
-                }));
+                crate::log::entry(
+                    crate::log::Level::Info,
+                    "agent_stop",
+                    &serde_json::json!({
+                        "reason": "user_cancel",
+                    }),
+                );
                 if let Some(ag) = agent.take() {
                     self.finish_agent(ag, true).await;
                 }
                 false
             }
             EventOutcome::CancelAndClear => {
-                crate::log::entry(crate::log::Level::Info, "agent_stop", &serde_json::json!({
-                    "reason": "user_cancel_and_clear",
-                }));
+                crate::log::entry(
+                    crate::log::Level::Info,
+                    "agent_stop",
+                    &serde_json::json!({
+                        "reason": "user_cancel_and_clear",
+                    }),
+                );
                 if let Some(ag) = agent.take() {
                     self.finish_agent(ag, true).await;
                 }
@@ -763,11 +846,8 @@ impl App {
                 self.screen.mark_dirty();
                 false
             }
-            EventOutcome::Rewind(block_idx) => {
-                if let Some(text) = self.rewind_to(block_idx) {
-                    self.input.buf = text;
-                    self.input.cpos = self.input.buf.len();
-                }
+            EventOutcome::OpenDialog(dlg) => {
+                *active_dialog = Some(*dlg);
                 false
             }
             EventOutcome::Submit(text) => {
@@ -791,6 +871,9 @@ impl App {
                         }
                         InputOutcome::Continue => {}
                         InputOutcome::Quit => return true,
+                        InputOutcome::OpenDialog(dlg) => {
+                            *active_dialog = Some(*dlg);
+                        }
                     }
                 }
                 false
@@ -907,15 +990,10 @@ impl App {
                         return EventOutcome::Noop;
                     }
                     self.screen.erase_prompt();
-                    if let Some(block_idx) = render::show_rewind(&turns) {
-                        return EventOutcome::Rewind(block_idx);
-                    }
-                    // Rewind cancelled — restore vim mode if we started from insert.
-                    if restore_mode == Some(vim::ViMode::Insert) {
-                        self.input.set_vim_mode(vim::ViMode::Insert);
-                    }
-                    self.screen.redraw(self.screen.has_scrollback);
-                    return EventOutcome::Redraw;
+                    let restore_vim_insert = restore_mode == Some(vim::ViMode::Insert);
+                    return EventOutcome::OpenDialog(Box::new(ActiveDialog::Rewind(
+                        render::RewindDialog::new(turns, restore_vim_insert),
+                    )));
                 }
                 // Single Esc in normal mode — start timer.
                 t.last_esc = Some(Instant::now());
@@ -1087,24 +1165,12 @@ impl App {
         // Everything else → InputState::handle_event (type-ahead with history).
         match self.input.handle_event(ev, Some(&mut self.input_history)) {
             Action::Submit(text) => {
-                let trimmed = text.trim();
-                match self.try_command_while_running(trimmed) {
-                    RunningCommandResult::Executed => {}
-                    RunningCommandResult::Blocked(reason) => {
-                        self.screen.push(Block::Error { message: reason });
-                        self.screen.flush_blocks();
-                    }
-                    RunningCommandResult::Quit => {
-                        return EventOutcome::Quit;
-                    }
-                    RunningCommandResult::Cancel => {
-                        return EventOutcome::CancelAndClear;
-                    }
-                    RunningCommandResult::NotACommand => {
-                        if !text.is_empty() {
-                            self.queued_messages.push(text);
-                        }
-                    }
+                if let Some(outcome) = self.try_command_while_running(text.trim()) {
+                    return outcome;
+                }
+                // Not a command — queue as a user message.
+                if !text.is_empty() {
+                    self.queued_messages.push(text);
                 }
                 self.screen.mark_dirty();
             }
@@ -1133,19 +1199,14 @@ impl App {
         self.input_history.push(trimmed.to_string());
         state::set_mode(self.mode);
 
-        if !self.handle_command(trimmed) {
-            return InputOutcome::Quit;
-        }
-        if trimmed == "/compact" {
-            return InputOutcome::Compact;
+        match self.handle_command(trimmed) {
+            CommandAction::Quit => return InputOutcome::Quit,
+            CommandAction::CancelAndClear => return InputOutcome::Continue, // already cleared
+            CommandAction::Compact => return InputOutcome::Compact,
+            CommandAction::OpenDialog(dlg) => return InputOutcome::OpenDialog(dlg),
+            CommandAction::Continue => {}
         }
         if trimmed.starts_with('/') && crate::completer::Completer::is_command(trimmed) {
-            return InputOutcome::Continue;
-        }
-
-        // Shell command
-        if let Some(cmd) = trimmed.strip_prefix('!') {
-            self.run_shell_escape(cmd);
             return InputOutcome::Continue;
         }
 
@@ -1191,9 +1252,13 @@ impl App {
     async fn finish_agent(&mut self, agent: AgentState, cancelled: bool) {
         self.screen.flush_blocks();
         if cancelled {
-            crate::log::entry(crate::log::Level::Info, "finish_agent", &serde_json::json!({
-                "cancelled": true,
-            }));
+            crate::log::entry(
+                crate::log::Level::Info,
+                "finish_agent",
+                &serde_json::json!({
+                    "cancelled": true,
+                }),
+            );
             self.screen.set_throbber(render::Throbber::Interrupted);
             let mut leftover: Vec<String> = agent.steering.lock().unwrap().drain(..).collect();
             leftover.append(&mut self.queued_messages);
@@ -1212,20 +1277,28 @@ impl App {
             self.screen.set_throbber(render::Throbber::Done);
             match agent.handle.await {
                 Ok(new_messages) => {
-                    crate::log::entry(crate::log::Level::Info, "finish_agent", &serde_json::json!({
-                        "cancelled": false,
-                        "result": "ok",
-                        "messages": new_messages.len(),
-                    }));
+                    crate::log::entry(
+                        crate::log::Level::Info,
+                        "finish_agent",
+                        &serde_json::json!({
+                            "cancelled": false,
+                            "result": "ok",
+                            "messages": new_messages.len(),
+                        }),
+                    );
                     self.history = new_messages;
                 }
                 Err(e) => {
-                    crate::log::entry(crate::log::Level::Error, "finish_agent", &serde_json::json!({
-                        "cancelled": false,
-                        "result": "join_error",
-                        "panic": e.is_panic(),
-                        "error": e.to_string(),
-                    }));
+                    crate::log::entry(
+                        crate::log::Level::Error,
+                        "finish_agent",
+                        &serde_json::json!({
+                            "cancelled": false,
+                            "result": "join_error",
+                            "panic": e.is_panic(),
+                            "error": e.to_string(),
+                        }),
+                    );
                 }
             }
         }
@@ -1237,55 +1310,90 @@ impl App {
 
     // ── Commands ─────────────────────────────────────────────────────────
 
-    pub fn handle_command(&mut self, input: &str) -> bool {
+    fn handle_command(&mut self, input: &str) -> CommandAction {
         match input {
-            "/exit" | "/quit" => return false,
+            "/exit" | "/quit" => CommandAction::Quit,
             "/clear" | "/new" => {
                 self.reset_session();
+                CommandAction::CancelAndClear
             }
+            "/compact" => CommandAction::Compact,
             "/resume" => {
-                self.resume_session();
+                let entries = self.resume_entries();
+                if entries.is_empty() {
+                    self.screen.push(Block::Error {
+                        message: "no saved sessions".into(),
+                    });
+                    self.screen.flush_blocks();
+                    CommandAction::Continue
+                } else {
+                    let cwd = std::env::current_dir()
+                        .ok()
+                        .and_then(|p| p.to_str().map(String::from))
+                        .unwrap_or_default();
+                    CommandAction::OpenDialog(Box::new(ActiveDialog::Resume(
+                        render::ResumeDialog::new(entries, cwd),
+                    )))
+                }
             }
             "/vim" => {
                 let enabled = !self.input.vim_enabled();
                 self.input.set_vim_enabled(enabled);
                 state::set_vim_enabled(enabled);
+                CommandAction::Continue
             }
-            "/compact" => {} // handled via InputOutcome::Compact
             "/export" => {
                 self.export_to_clipboard();
+                CommandAction::Continue
             }
             "/ps" => {
-                self.show_processes();
+                let list = self.processes.list();
+                if list.is_empty() {
+                    self.screen.push(Block::Error {
+                        message: "no background processes".into(),
+                    });
+                    self.screen.flush_blocks();
+                    CommandAction::Continue
+                } else {
+                    CommandAction::OpenDialog(Box::new(ActiveDialog::Ps(render::PsDialog::new(
+                        list,
+                    ))))
+                }
             }
-            _ => {}
+            _ if input.starts_with('!') => {
+                self.run_shell_escape(&input[1..]);
+                CommandAction::Continue
+            }
+            _ => CommandAction::Continue,
         }
-        true
     }
 
-    fn try_command_while_running(&mut self, input: &str) -> RunningCommandResult {
-        let result = classify_running_command(input);
-        // Execute side effects for the Executed variants.
-        if matches!(result, RunningCommandResult::Executed) {
-            match input {
-                "/vim" => {
-                    let enabled = !self.input.vim_enabled();
-                    self.input.set_vim_enabled(enabled);
-                    state::set_vim_enabled(enabled);
-                }
-                "/export" => {
-                    self.export_to_clipboard();
-                }
-                "/ps" => {
-                    self.show_processes();
-                }
-                _ if input.starts_with('!') => {
-                    self.run_shell_escape(&input[1..]);
-                }
-                _ => {}
-            }
+    /// Execute a command while the agent is running.
+    /// Returns the `EventOutcome` to use, or `None` to queue as a message.
+    fn try_command_while_running(&mut self, input: &str) -> Option<EventOutcome> {
+        // Not a command — will be queued as a user message.
+        if !input.starts_with('/') && !input.starts_with('!') {
+            return None;
         }
-        result
+        if input.starts_with('/') && !crate::completer::Completer::is_command(input) {
+            return None;
+        }
+
+        // Access control: some commands are blocked while running.
+        if let Err(reason) = is_allowed_while_running(input) {
+            self.screen.push(Block::Error { message: reason });
+            self.screen.flush_blocks();
+            return Some(EventOutcome::Noop);
+        }
+
+        // Delegate to the unified handler.
+        match self.handle_command(input) {
+            CommandAction::Quit => Some(EventOutcome::Quit),
+            CommandAction::CancelAndClear => Some(EventOutcome::CancelAndClear),
+            CommandAction::OpenDialog(dlg) => Some(EventOutcome::OpenDialog(dlg)),
+            CommandAction::Continue => Some(EventOutcome::Noop),
+            CommandAction::Compact => unreachable!(), // blocked above
+        }
     }
 
     fn run_shell_escape(&mut self, raw: &str) {
@@ -1358,34 +1466,6 @@ impl App {
         self.input.clear();
     }
 
-    pub fn resume_session(&mut self) {
-        let entries = self.resume_entries();
-        if entries.is_empty() {
-            self.screen.push(Block::Error {
-                message: "no saved sessions".into(),
-            });
-            self.screen.flush_blocks();
-            return;
-        }
-
-        let cwd = std::env::current_dir()
-            .ok()
-            .and_then(|p| p.to_str().map(String::from))
-            .unwrap_or_default();
-        if let Some(id) = render::show_resume(&entries, &cwd) {
-            if let Some(loaded) = session::load(&id) {
-                self.load_session(loaded);
-                self.rebuild_screen_from_history();
-                self.screen.flush_blocks();
-            }
-        } else {
-            // Resume cancelled — restore the screen (show_resume clears it).
-            self.screen.redraw(self.screen.has_scrollback);
-        }
-        // show_resume manages its own raw mode — re-enable.
-        terminal::enable_raw_mode().ok();
-    }
-
     pub fn resume_session_before_run(&mut self) {
         let entries = self.resume_entries();
         if entries.is_empty() {
@@ -1397,9 +1477,29 @@ impl App {
             .ok()
             .and_then(|p| p.to_str().map(String::from))
             .unwrap_or_default();
-        if let Some(id) = render::show_resume(&entries, &cwd) {
-            if let Some(loaded) = session::load(&id) {
-                self.load_session(loaded);
+        let mut dialog = render::ResumeDialog::new(entries, cwd);
+        terminal::enable_raw_mode().ok();
+        loop {
+            dialog.draw();
+            match event::read() {
+                Ok(Event::Key(KeyEvent {
+                    code, modifiers, ..
+                })) => {
+                    if let Some(maybe_id) = dialog.handle_key(code, modifiers) {
+                        dialog.cleanup();
+                        terminal::disable_raw_mode().ok();
+                        if let Some(id) = maybe_id {
+                            if let Some(loaded) = session::load(&id) {
+                                self.load_session(loaded);
+                            }
+                        }
+                        return;
+                    }
+                }
+                Ok(Event::Resize(_, h)) => {
+                    dialog.handle_resize(h);
+                }
+                _ => {}
             }
         }
     }
@@ -1881,10 +1981,14 @@ impl App {
                 false
             }
             ConfirmChoice::No => {
-                crate::log::entry(crate::log::Level::Info, "agent_stop", &serde_json::json!({
-                    "reason": "confirm_denied",
-                    "tool": tool_name,
-                }));
+                crate::log::entry(
+                    crate::log::Level::Info,
+                    "agent_stop",
+                    &serde_json::json!({
+                        "reason": "confirm_denied",
+                        "tool": tool_name,
+                    }),
+                );
                 let _ = reply.send((false, message));
                 self.screen.finish_tool(ToolStatus::Denied, None);
                 if let Some(ref mut ag) = agent {
@@ -1910,9 +2014,13 @@ impl App {
                 false
             }
             None => {
-                crate::log::entry(crate::log::Level::Info, "agent_stop", &serde_json::json!({
-                    "reason": "question_cancelled",
-                }));
+                crate::log::entry(
+                    crate::log::Level::Info,
+                    "agent_stop",
+                    &serde_json::json!({
+                        "reason": "question_cancelled",
+                    }),
+                );
                 let _ = reply.send("User cancelled the question.".into());
                 self.screen.finish_tool(ToolStatus::Denied, None);
                 if let Some(ref mut ag) = agent {
@@ -2018,29 +2126,14 @@ impl App {
         if has_dialog {
             return;
         }
-        self.screen.set_running_procs(self.processes.running_count());
+        self.screen
+            .set_running_procs(self.processes.running_count());
         if agent_running {
             self.render_screen();
         } else {
             self.screen
                 .draw_prompt(&self.input, self.mode, render::term_width());
         }
-    }
-
-    fn show_processes(&mut self) {
-        let list = self.processes.list();
-        if list.is_empty() {
-            self.screen.push(Block::Error {
-                message: "no background processes".into(),
-            });
-            self.screen.flush_blocks();
-            return;
-        }
-        let killed = render::show_ps(&list);
-        for id in &killed {
-            let _ = self.processes.stop(id);
-        }
-        self.screen.redraw(self.screen.has_scrollback);
     }
 
     fn export_to_clipboard(&mut self) {
@@ -2123,28 +2216,6 @@ enum LoopAction {
     Done,
 }
 
-/// Intermediate type for dispatching dialog results in dispatch_terminal_event.
-enum DialogOutcome {
-    Confirm(ConfirmChoice, Option<String>),
-    Question(Option<String>), // Some(json) on confirm, None on cancel
-}
-
-impl DialogOutcome {
-    fn into_confirm(self) -> (ConfirmChoice, Option<String>) {
-        match self {
-            DialogOutcome::Confirm(c, m) => (c, m),
-            _ => unreachable!(),
-        }
-    }
-
-    fn into_question(self) -> Option<String> {
-        match self {
-            DialogOutcome::Question(a) => a,
-            _ => unreachable!(),
-        }
-    }
-}
-
 pub struct PendingTool {
     pub name: String,
 }
@@ -2154,6 +2225,9 @@ fn draw_active_dialog(dlg: &mut Option<ActiveDialog>) {
         match dlg {
             ActiveDialog::Confirm { dialog, .. } => dialog.draw(),
             ActiveDialog::AskQuestion { dialog, .. } => dialog.draw(),
+            ActiveDialog::Ps(d) => d.draw(),
+            ActiveDialog::Rewind(d) => d.draw(),
+            ActiveDialog::Resume(d) => d.draw(),
         }
     }
 }
@@ -2162,102 +2236,25 @@ fn draw_active_dialog(dlg: &mut Option<ActiveDialog>) {
 mod tests {
     use super::*;
 
-    // ── classify_running_command ──────────────────────────────────────
+    // ── is_allowed_while_running ─────────────────────────────────────
 
     #[test]
-    fn running_vim_is_executed() {
-        assert!(matches!(
-            classify_running_command("/vim"),
-            RunningCommandResult::Executed
-        ));
+    fn running_allowed_commands() {
+        assert!(is_allowed_while_running("/vim").is_ok());
+        assert!(is_allowed_while_running("/export").is_ok());
+        assert!(is_allowed_while_running("/ps").is_ok());
+        assert!(is_allowed_while_running("/exit").is_ok());
+        assert!(is_allowed_while_running("/quit").is_ok());
+        assert!(is_allowed_while_running("/clear").is_ok());
+        assert!(is_allowed_while_running("!ls").is_ok());
     }
 
     #[test]
-    fn running_export_is_executed() {
-        assert!(matches!(
-            classify_running_command("/export"),
-            RunningCommandResult::Executed
-        ));
-    }
-
-    #[test]
-    fn running_exit_is_quit() {
-        assert!(matches!(
-            classify_running_command("/exit"),
-            RunningCommandResult::Quit
-        ));
-        assert!(matches!(
-            classify_running_command("/quit"),
-            RunningCommandResult::Quit
-        ));
-    }
-
-    #[test]
-    fn running_clear_is_cancel() {
-        assert!(matches!(
-            classify_running_command("/clear"),
-            RunningCommandResult::Cancel
-        ));
-        assert!(matches!(
-            classify_running_command("/new"),
-            RunningCommandResult::Cancel
-        ));
-    }
-
-    #[test]
-    fn running_compact_is_blocked() {
-        assert!(matches!(
-            classify_running_command("/compact"),
-            RunningCommandResult::Blocked(_)
-        ));
-    }
-
-    #[test]
-    fn running_resume_is_blocked() {
-        assert!(matches!(
-            classify_running_command("/resume"),
-            RunningCommandResult::Blocked(_)
-        ));
-    }
-
-    #[test]
-    fn running_settings_is_blocked() {
-        assert!(matches!(
-            classify_running_command("/settings"),
-            RunningCommandResult::Blocked(_)
-        ));
-    }
-
-    #[test]
-    fn running_model_is_blocked() {
-        assert!(matches!(
-            classify_running_command("/model"),
-            RunningCommandResult::Blocked(_)
-        ));
-    }
-
-    #[test]
-    fn running_shell_escape_is_executed() {
-        assert!(matches!(
-            classify_running_command("!ls"),
-            RunningCommandResult::Executed
-        ));
-        assert!(matches!(
-            classify_running_command("!cargo build && cargo test"),
-            RunningCommandResult::Executed
-        ));
-    }
-
-    #[test]
-    fn running_normal_message_is_not_a_command() {
-        assert!(matches!(
-            classify_running_command("fix the bug"),
-            RunningCommandResult::NotACommand
-        ));
-        assert!(matches!(
-            classify_running_command("use /tmp/foo as output"),
-            RunningCommandResult::NotACommand
-        ));
+    fn running_blocked_commands() {
+        assert!(is_allowed_while_running("/compact").is_err());
+        assert!(is_allowed_while_running("/resume").is_err());
+        assert!(is_allowed_while_running("/settings").is_err());
+        assert!(is_allowed_while_running("/model").is_err());
     }
 
     // ── classify_startup_command ──────────────────────────────────────

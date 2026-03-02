@@ -125,7 +125,9 @@ impl ProcessRegistry {
     /// Read new output since the last read. Returns (new_lines, running, exit_code).
     pub fn read(&self, id: &str) -> Result<(String, bool, Option<i32>), String> {
         let mut map = self.0.lock().unwrap();
-        let p = map.get_mut(id).ok_or_else(|| format!("no process with id '{id}'"))?;
+        let p = map
+            .get_mut(id)
+            .ok_or_else(|| format!("no process with id '{id}'"))?;
         let new_lines = &p.lines[p.read_cursor..];
         let output = new_lines.join("\n");
         p.read_cursor = p.lines.len();
@@ -136,7 +138,9 @@ impl ProcessRegistry {
     pub fn stop(&self, id: &str) -> Result<String, String> {
         let kill_tx = {
             let mut map = self.0.lock().unwrap();
-            let p = map.get_mut(id).ok_or_else(|| format!("no process with id '{id}'"))?;
+            let p = map
+                .get_mut(id)
+                .ok_or_else(|| format!("no process with id '{id}'"))?;
             p.kill_tx.take()
         };
         if let Some(tx) = kill_tx {
@@ -145,7 +149,9 @@ impl ProcessRegistry {
         // Give the background task a moment to finish
         std::thread::sleep(std::time::Duration::from_millis(100));
         let map = self.0.lock().unwrap();
-        let p = map.get(id).ok_or_else(|| format!("no process with id '{id}'"))?;
+        let p = map
+            .get(id)
+            .ok_or_else(|| format!("no process with id '{id}'"))?;
         Ok(p.lines.join("\n"))
     }
 

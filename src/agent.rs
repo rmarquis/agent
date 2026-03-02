@@ -147,10 +147,14 @@ pub async fn run_agent(
             {
                 Ok(r) => r,
                 Err(e) => {
-                    log::entry(log::Level::Warn, "agent_stop", &serde_json::json!({
-                        "reason": "llm_error",
-                        "error": e,
-                    }));
+                    log::entry(
+                        log::Level::Warn,
+                        "agent_stop",
+                        &serde_json::json!({
+                            "reason": "llm_error",
+                            "error": e,
+                        }),
+                    );
                     let _ = tx.send(AgentEvent::Error(e));
                     messages.remove(0);
                     return messages;
@@ -180,10 +184,14 @@ pub async fn run_agent(
         let tool_calls = resp.tool_calls;
 
         if tool_calls.is_empty() {
-            log::entry(log::Level::Info, "agent_stop", &serde_json::json!({
-                "reason": "no_tool_calls",
-                "has_content": content.is_some(),
-            }));
+            log::entry(
+                log::Level::Info,
+                "agent_stop",
+                &serde_json::json!({
+                    "reason": "no_tool_calls",
+                    "has_content": content.is_some(),
+                }),
+            );
             messages.push(Message {
                 role: Role::Assistant,
                 content,
@@ -302,12 +310,8 @@ pub async fn run_agent(
                 {
                     Ok(child) => {
                         let id = ctx.processes.next_id();
-                        ctx.processes.spawn(
-                            id.clone(),
-                            &command,
-                            child,
-                            ctx.proc_done_tx.clone(),
-                        );
+                        ctx.processes
+                            .spawn(id.clone(), &command, child, ctx.proc_done_tx.clone());
                         ToolResult {
                             content: format!("background process started with id: {id}"),
                             is_error: false,
@@ -335,9 +339,7 @@ pub async fn run_agent(
                         Ok((output, running, exit_code)) => {
                             if !output.is_empty() {
                                 for line in output.lines() {
-                                    let _ = tx.send(AgentEvent::ToolOutputChunk(
-                                        line.to_string(),
-                                    ));
+                                    let _ = tx.send(AgentEvent::ToolOutputChunk(line.to_string()));
                                 }
                                 if !accumulated.is_empty() {
                                     accumulated.push('\n');
@@ -345,20 +347,14 @@ pub async fn run_agent(
                                 accumulated.push_str(&output);
                             }
                             if !running {
-                                break tools::format_read_result(
-                                    accumulated, false, exit_code,
-                                );
+                                break tools::format_read_result(accumulated, false, exit_code);
                             }
                             if ctx.cancel.is_cancelled() {
                                 let _ = ctx.processes.stop(&id);
-                                break tools::format_read_result(
-                                    accumulated, false, None,
-                                );
+                                break tools::format_read_result(accumulated, false, None);
                             }
                             if tokio::time::Instant::now() >= deadline {
-                                break tools::format_read_result(
-                                    accumulated, true, None,
-                                );
+                                break tools::format_read_result(accumulated, true, None);
                             }
                             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                         }

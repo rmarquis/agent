@@ -238,7 +238,11 @@ pub(super) fn render_tool(
         ToolStatus::Confirm => theme::ACCENT,
         ToolStatus::Pending => theme::TOOL_PENDING,
     };
-    let time = if matches!(name, "bash" | "web_fetch" | "read_process_output" | "stop_process") && status != ToolStatus::Confirm {
+    let time = if matches!(
+        name,
+        "bash" | "web_fetch" | "read_process_output" | "stop_process"
+    ) && status != ToolStatus::Confirm
+    {
         elapsed
     } else {
         None
