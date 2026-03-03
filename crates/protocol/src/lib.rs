@@ -77,6 +77,9 @@ pub enum EngineEvent {
     /// Response to `UiCommand::GenerateTitle`.
     TitleGenerated { title: String },
 
+    /// Snapshot of the engine's message list, sent after each significant step.
+    Messages { messages: Vec<Message> },
+
     /// The agent turn completed successfully.
     TurnComplete { messages: Vec<Message> },
 

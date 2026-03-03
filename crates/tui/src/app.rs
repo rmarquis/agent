@@ -639,6 +639,9 @@ impl App {
                         answer: Some("User is not available (headless mode).".into()),
                     });
                 }
+                EngineEvent::Messages { messages } => {
+                    self.history = messages;
+                }
                 EngineEvent::TurnError { message } => {
                     eprintln!("[error] {message}");
                 }
@@ -1784,6 +1787,10 @@ impl App {
                 self.save_session();
                 SessionControl::Continue
             }
+            EngineEvent::Messages { messages } => {
+                self.history = messages;
+                SessionControl::Continue
+            }
             EngineEvent::TurnComplete { messages } => {
                 self.history = messages;
                 SessionControl::Done
@@ -1799,6 +1806,9 @@ impl App {
     /// Handle engine events that arrive when no agent turn is active.
     fn handle_engine_event_idle(&mut self, ev: EngineEvent) {
         match ev {
+            EngineEvent::Messages { messages } => {
+                self.history = messages;
+            }
             EngineEvent::CompactionComplete { messages } => {
                 self.history = messages;
                 self.save_session();

@@ -158,6 +158,13 @@ async fn run_turn(
     let tool_defs: Vec<ToolDefinition> = registry.definitions(permissions, mode);
     let mut first = true;
 
+    // Send a snapshot of the current messages (minus the system prompt) to the TUI.
+    let send_snapshot = |msgs: &[Message], tx: &mpsc::UnboundedSender<EngineEvent>| {
+        let _ = tx.send(EngineEvent::Messages {
+            messages: msgs[1..].to_vec(),
+        });
+    };
+
     loop {
         // Drain pending commands (steering, mode changes, cancel, process list)
         if !first {
@@ -220,6 +227,7 @@ async fn run_turn(
                         "agent_stop",
                         &serde_json::json!({"reason": "llm_error", "error": e}),
                     );
+                    send_snapshot(&messages, event_tx);
                     let _ = event_tx.send(EngineEvent::TurnError { message: e });
                 }
                 return;
@@ -261,6 +269,7 @@ async fn run_turn(
                 tool_calls: None,
                 tool_call_id: None,
             });
+            send_snapshot(&messages, event_tx);
             messages.remove(0);
             let _ = event_tx.send(EngineEvent::TurnComplete { messages });
             return;
@@ -273,6 +282,7 @@ async fn run_turn(
             tool_calls: Some(tool_calls.clone()),
             tool_call_id: None,
         });
+        send_snapshot(&messages, event_tx);
 
         for tc in &tool_calls {
             let args: HashMap<String, Value> =
@@ -494,6 +504,7 @@ async fn run_turn(
                 call_id: tc.id.clone(),
                 result: ToolOutcome { content, is_error },
             });
+            send_snapshot(&messages, event_tx);
         }
     }
 }
