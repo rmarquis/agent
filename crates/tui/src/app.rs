@@ -834,7 +834,7 @@ impl App {
                         }
                         self.screen.erase_prompt();
                     }
-                    MenuResult::Dismissed => {}
+                    MenuResult::Stats | MenuResult::Dismissed => {}
                 }
                 self.screen.mark_dirty();
                 false
@@ -1021,6 +1021,13 @@ impl App {
             Action::Submit(text) if text.trim() == "/settings" => {
                 self.input
                     .open_settings(self.input.vim_enabled(), self.auto_compact);
+                self.screen.mark_dirty();
+                EventOutcome::Redraw
+            }
+            Action::Submit(text) if text.trim() == "/stats" => {
+                let entries = crate::metrics::load();
+                let lines = crate::metrics::render_stats(&entries);
+                self.input.open_stats(lines);
                 self.screen.mark_dirty();
                 EventOutcome::Redraw
             }
@@ -1685,10 +1692,22 @@ impl App {
     ) -> SessionControl {
         match ev {
             EngineEvent::Ready => SessionControl::Continue,
-            EngineEvent::TokenUsage { prompt_tokens } => {
+            EngineEvent::TokenUsage {
+                prompt_tokens,
+                completion_tokens,
+            } => {
                 if prompt_tokens > 0 {
                     self.screen.set_context_tokens(prompt_tokens);
                 }
+                crate::metrics::append(&crate::metrics::MetricsEntry {
+                    timestamp_ms: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64,
+                    prompt_tokens,
+                    completion_tokens: completion_tokens.unwrap_or(0),
+                    model: self.model.clone(),
+                });
                 self.screen.set_throbber(render::Throbber::Working);
                 SessionControl::Continue
             }

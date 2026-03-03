@@ -63,6 +63,7 @@ impl Completer {
             ("settings", "open settings menu"),
             ("compact", "compact conversation history"),
             ("export", "copy conversation to clipboard"),
+            ("stats", "show token usage statistics"),
             ("ps", "manage background processes"),
             ("exit", "exit the app"),
             ("quit", "exit the app"),
@@ -133,8 +134,7 @@ impl Completer {
                 .all_items
                 .iter()
                 .filter_map(|item| {
-                    crate::fuzzy::fuzzy_score(&item.label, &self.query)
-                        .map(|s| (s, item.clone()))
+                    crate::fuzzy::fuzzy_score(&item.label, &self.query).map(|s| (s, item.clone()))
                 })
                 .collect();
             scored.sort_by_key(|(s, _)| *s);
@@ -175,7 +175,6 @@ impl Clone for CompletionItem {
     }
 }
 
-
 /// Get tracked + untracked (but not ignored) files and directories via git.
 fn git_files() -> Vec<String> {
     let output = Command::new("git")
@@ -192,7 +191,11 @@ fn git_files() -> Vec<String> {
                     let mut parts = Vec::new();
                     // Collect parent directories.
                     let mut prefix = String::new();
-                    for component in std::path::Path::new(l).parent().into_iter().flat_map(|p| p.components()) {
+                    for component in std::path::Path::new(l)
+                        .parent()
+                        .into_iter()
+                        .flat_map(|p| p.components())
+                    {
                         if !prefix.is_empty() {
                             prefix.push('/');
                         }

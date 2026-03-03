@@ -44,6 +44,7 @@ pub struct LLMResponse {
     pub reasoning_content: Option<String>,
     pub tool_calls: Vec<ToolCall>,
     pub prompt_tokens: Option<u32>,
+    pub completion_tokens: Option<u32>,
 }
 
 pub struct Provider {
@@ -194,6 +195,9 @@ impl Provider {
             };
 
             let prompt_tokens = data["usage"]["prompt_tokens"].as_u64().map(|n| n as u32);
+            let completion_tokens = data["usage"]["completion_tokens"]
+                .as_u64()
+                .map(|n| n as u32);
 
             log::entry(
                 log::Level::Debug,
@@ -210,6 +214,7 @@ impl Provider {
                 reasoning_content,
                 tool_calls,
                 prompt_tokens,
+                completion_tokens,
             });
         }
 
@@ -283,7 +288,14 @@ impl Provider {
             tool_call_id: None,
         };
         let resp = self
-            .chat(&[system, user], &[], model, ReasoningEffort::Off, cancel, None)
+            .chat(
+                &[system, user],
+                &[],
+                model,
+                ReasoningEffort::Off,
+                cancel,
+                None,
+            )
             .await?;
         let summary = resp.content.unwrap_or_default();
         if summary.trim().is_empty() {

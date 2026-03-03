@@ -4,6 +4,7 @@ pub mod config;
 pub mod fuzzy;
 pub mod input;
 pub mod instructions;
+pub mod metrics;
 pub mod perf;
 pub mod render;
 pub mod session;
@@ -46,7 +47,11 @@ pub fn expand_at_refs(input: &str) -> String {
     for path in &refs {
         let p = std::path::Path::new(path);
         if p.is_dir() {
-            if let Ok(output) = std::process::Command::new("ls").arg("-1").arg(path).output() {
+            if let Ok(output) = std::process::Command::new("ls")
+                .arg("-1")
+                .arg(path)
+                .output()
+            {
                 let listing = String::from_utf8_lossy(&output.stdout);
                 result.push_str(&format!(
                     "\n\nDirectory listing of {}:\n```\n{}\n```",

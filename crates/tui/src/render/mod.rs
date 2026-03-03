@@ -1647,7 +1647,6 @@ fn render_styled_chars(out: &mut io::Stdout, line: &str, kinds: &[SpanKind]) {
     }
 }
 
-
 fn draw_completions(
     out: &mut io::Stdout,
     completer: Option<&crate::completer::Completer>,
@@ -1753,6 +1752,7 @@ fn draw_menu(
             }
             drawn
         }
+        MenuKind::Stats { lines } => draw_stats(out, lines, max_rows),
         MenuKind::Model { models } => {
             if models.is_empty() {
                 return 0;
@@ -1809,4 +1809,93 @@ fn draw_menu_row(out: &mut io::Stdout, label: &str, detail: &str, col: usize, se
     let _ = out.queue(Print(format!("{}{}", padding, detail)));
     let _ = out.queue(SetAttribute(Attribute::Reset));
     let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
+}
+
+/// Heat intensity colors: dim → accent, 4 levels.
+const HEAT_COLORS: [Color; 4] = [
+    Color::AnsiValue(238), // very dim
+    Color::AnsiValue(103), // muted lavender
+    Color::AnsiValue(141), // medium lavender
+    Color::AnsiValue(147), // bright accent
+];
+const HEAT_CHAR: &str = "█";
+const HEAT_EMPTY: &str = "·";
+
+fn draw_stats(out: &mut io::Stdout, lines: &[crate::metrics::StatsLine], max_rows: usize) -> usize {
+    use crate::metrics::StatsLine;
+
+    let mut drawn = 0;
+    for line in lines {
+        if drawn >= max_rows {
+            break;
+        }
+        if drawn > 0 {
+            let _ = out.queue(Print("\r\n"));
+        }
+        match line {
+            StatsLine::Kv { label, value } => {
+                let _ = out.queue(Print("  "));
+                let _ = out.queue(SetAttribute(Attribute::Dim));
+                let _ = out.queue(Print(label));
+                let _ = out.queue(SetAttribute(Attribute::Reset));
+                let padding = " ".repeat(10usize.saturating_sub(label.len()));
+                let _ = out.queue(Print(padding));
+                let _ = out.queue(Print(value));
+            }
+            StatsLine::Sub(text) => {
+                let _ = out.queue(Print("    "));
+                let _ = out.queue(SetAttribute(Attribute::Dim));
+                let _ = out.queue(Print(text));
+                let _ = out.queue(SetAttribute(Attribute::Reset));
+            }
+            StatsLine::Heading(text) => {
+                let _ = out.queue(Print("  "));
+                let _ = out.queue(SetAttribute(Attribute::Dim));
+                let _ = out.queue(Print(text));
+                let _ = out.queue(SetAttribute(Attribute::Reset));
+            }
+            StatsLine::Sparkline { bars, legend } => {
+                let _ = out.queue(Print("  "));
+                let _ = out.queue(SetForegroundColor(theme::ACCENT));
+                let _ = out.queue(Print(bars));
+                let _ = out.queue(ResetColor);
+                let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
+                drawn += 1;
+                if drawn < max_rows {
+                    let _ = out.queue(Print("\r\n"));
+                    let _ = out.queue(Print("  "));
+                    let _ = out.queue(SetAttribute(Attribute::Dim));
+                    let _ = out.queue(Print(legend));
+                    let _ = out.queue(SetAttribute(Attribute::Reset));
+                }
+            }
+            StatsLine::HeatRow { label, cells } => {
+                let _ = out.queue(Print("  "));
+                let _ = out.queue(SetAttribute(Attribute::Dim));
+                let _ = out.queue(Print(format!("{label} ")));
+                let _ = out.queue(SetAttribute(Attribute::Reset));
+                for cell in cells {
+                    match cell {
+                        crate::metrics::HeatCell::Empty => {
+                            let _ = out.queue(SetForegroundColor(Color::AnsiValue(238)));
+                            let _ = out.queue(Print(format!("{HEAT_EMPTY} ")));
+                            let _ = out.queue(ResetColor);
+                        }
+                        crate::metrics::HeatCell::Level(lvl) => {
+                            let color = HEAT_COLORS[(*lvl as usize).min(3)];
+                            let _ = out.queue(SetForegroundColor(color));
+                            let _ = out.queue(Print(format!("{HEAT_CHAR} ")));
+                            let _ = out.queue(ResetColor);
+                        }
+                    }
+                }
+            }
+            StatsLine::Blank => {
+                // just an empty line
+            }
+        }
+        let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
+        drawn += 1;
+    }
+    drawn
 }

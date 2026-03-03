@@ -213,7 +213,14 @@ async fn run_turn(
         };
 
         let resp = match provider
-            .chat(&messages, &tool_defs, model, reasoning_effort, &cancel, Some(&on_retry))
+            .chat(
+                &messages,
+                &tool_defs,
+                model,
+                reasoning_effort,
+                &cancel,
+                Some(&on_retry),
+            )
             .await
         {
             Ok(r) => r,
@@ -237,6 +244,7 @@ async fn run_turn(
         if let Some(tokens) = resp.prompt_tokens {
             let _ = event_tx.send(EngineEvent::TokenUsage {
                 prompt_tokens: tokens,
+                completion_tokens: resp.completion_tokens,
             });
         }
 
@@ -355,7 +363,8 @@ async fn run_turn(
                     });
 
                     let (approved, user_msg) =
-                        wait_for_permission(cmd_rx, request_id, &mut mode, &mut reasoning_effort).await;
+                        wait_for_permission(cmd_rx, request_id, &mut mode, &mut reasoning_effort)
+                            .await;
                     if !approved {
                         let denial = if let Some(ref msg) = user_msg {
                             format!("The user denied this tool call with message: {msg}")
@@ -376,7 +385,8 @@ async fn run_turn(
                     request_id,
                     args: args.clone(),
                 });
-                let answer = wait_for_answer(cmd_rx, request_id, &mut mode, &mut reasoning_effort).await;
+                let answer =
+                    wait_for_answer(cmd_rx, request_id, &mut mode, &mut reasoning_effort).await;
                 ToolResult {
                     content: answer.unwrap_or_else(|| "no response".into()),
                     is_error: false,

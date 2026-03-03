@@ -279,7 +279,6 @@ fn finish_dialog_frame(out: &mut io::Stdout, cursor_pos: Option<(u16, u16)>, edi
     let _ = out.flush();
 }
 
-
 // ── Dialog types ──────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -713,7 +712,6 @@ impl ConfirmDialog {
         }
         scroll
     }
-
 }
 
 // ── RewindDialog ─────────────────────────────────────────────────────────────
@@ -848,7 +846,6 @@ impl RewindDialog {
         let _ = out.queue(SetAttribute(Attribute::Reset));
         end_dialog_draw(&mut out, start_row, total_rows, height)
     }
-
 }
 
 // ── ResumeDialog ──────────────────────────────────────────────────────────────
@@ -1032,7 +1029,13 @@ impl ResumeDialog {
         if !self.dirty {
             let freshest = self.filtered.iter().map(resume_ts).max().unwrap_or(0);
             let age_s = session::now_ms().saturating_sub(freshest) / 1000;
-            let interval = if age_s < 60 { 1 } else if age_s < 3600 { 30 } else { 60 };
+            let interval = if age_s < 60 {
+                1
+            } else if age_s < 3600 {
+                30
+            } else {
+                60
+            };
             if self.last_drawn.elapsed().as_secs() >= interval {
                 self.dirty = true;
             }
@@ -1164,8 +1167,13 @@ impl PsDialog {
         }
     }
 
-    fn fetch_procs(registry: &engine::tools::ProcessRegistry, killed: &[String]) -> Vec<ProcessInfo> {
-        registry.list().into_iter()
+    fn fetch_procs(
+        registry: &engine::tools::ProcessRegistry,
+        killed: &[String],
+    ) -> Vec<ProcessInfo> {
+        registry
+            .list()
+            .into_iter()
             .filter(|p| !killed.contains(&p.id))
             .collect()
     }
@@ -1316,7 +1324,6 @@ impl PsDialog {
         let _ = out.queue(SetAttribute(Attribute::Reset));
         end_dialog_draw(&mut out, start_row, total_rows, height)
     }
-
 }
 
 /// Non-blocking question dialog state machine.
@@ -1682,7 +1689,6 @@ impl QuestionDialog {
 
         (bar_row + fixed_rows).saturating_sub(height)
     }
-
 
     fn build_answer(&self) -> String {
         let mut answers = serde_json::Map::new();

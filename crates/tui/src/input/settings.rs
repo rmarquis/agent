@@ -100,6 +100,9 @@ pub enum MenuKind {
         /// (key, model_name, provider_name) for each entry.
         models: Vec<(String, String, String)>,
     },
+    Stats {
+        lines: Vec<crate::metrics::StatsLine>,
+    },
 }
 
 pub struct MenuState {
@@ -111,5 +114,6 @@ pub struct MenuState {
 pub enum MenuResult {
     Settings { vim: bool, auto_compact: bool },
     ModelSelect(String),
+    Stats,
     Dismissed,
 }
