@@ -73,10 +73,70 @@ enum CommandAction {
 
 /// Check whether a command is allowed while the agent is running.
 /// Returns `Err(reason)` for commands that are blocked.
+/// Arrange flat session entries into a tree: roots first (sorted by
+/// updated_at descending), each followed by its forks (also sorted).
+fn build_session_tree(mut flat: Vec<ResumeEntry>) -> Vec<ResumeEntry> {
+    use std::collections::HashMap;
+
+    // Index children by parent_id.
+    let mut children: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, entry) in flat.iter().enumerate() {
+        if let Some(ref pid) = entry.parent_id {
+            children.entry(pid.clone()).or_default().push(i);
+        }
+    }
+
+    // Collect root indices (no parent, or parent doesn't exist in the set).
+    let ids: std::collections::HashSet<&str> = flat.iter().map(|e| e.id.as_str()).collect();
+    let root_indices: Vec<usize> = flat
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| {
+            e.parent_id
+                .as_ref()
+                .is_none_or(|pid| !ids.contains(pid.as_str()))
+        })
+        .map(|(i, _)| i)
+        .collect();
+
+    // Recursively emit entries with depth.
+    let mut result = Vec::with_capacity(flat.len());
+    fn emit(
+        idx: usize,
+        depth: usize,
+        flat: &mut Vec<ResumeEntry>,
+        children: &HashMap<String, Vec<usize>>,
+        result: &mut Vec<ResumeEntry>,
+    ) {
+        let mut entry = flat[idx].clone();
+        entry.depth = depth;
+        let id = entry.id.clone();
+        result.push(entry);
+        if let Some(child_indices) = children.get(&id) {
+            let mut sorted: Vec<usize> = child_indices.clone();
+            sorted.sort_by(|a, b| {
+                let ta = flat[*b].updated_at_ms;
+                let tb = flat[*a].updated_at_ms;
+                ta.cmp(&tb)
+            });
+            for ci in sorted {
+                emit(ci, depth + 1, flat, children, result);
+            }
+        }
+    }
+
+    for ri in root_indices {
+        emit(ri, 0, &mut flat, &children, &mut result);
+    }
+
+    result
+}
+
 fn is_allowed_while_running(input: &str) -> Result<(), String> {
     match input {
         "/compact" => Err("cannot compact while agent is working".into()),
         "/resume" => Err("cannot resume while agent is working".into()),
+        "/fork" => Err("cannot fork while agent is working".into()),
         "/settings" => Err("cannot open settings while agent is working".into()),
         "/model" => Err("cannot switch model while agent is working".into()),
         _ => Ok(()),
@@ -1270,7 +1330,7 @@ impl App {
 
     fn handle_command(&mut self, input: &str) -> CommandAction {
         match input {
-            "/exit" | "/quit" => CommandAction::Quit,
+            "/exit" | "/quit" | ":q" | ":qa" | ":wq" | ":wqa" => CommandAction::Quit,
             "/clear" | "/new" => {
                 self.reset_session();
                 CommandAction::CancelAndClear
@@ -1317,6 +1377,10 @@ impl App {
                     ))))
                 }
             }
+            "/fork" => {
+                self.fork_session();
+                CommandAction::Continue
+            }
             _ if input.starts_with('!') => {
                 self.run_shell_escape(&input[1..]);
                 CommandAction::Continue
@@ -1329,7 +1393,7 @@ impl App {
     /// Returns the `EventOutcome` to use, or `None` to queue as a message.
     fn try_command_while_running(&mut self, input: &str) -> Option<EventOutcome> {
         // Not a command — will be queued as a user message.
-        if !input.starts_with('/') && !input.starts_with('!') {
+        if !input.starts_with('/') && !input.starts_with('!') && !matches!(input, ":q" | ":qa" | ":wq" | ":wqa") {
             return None;
         }
         if input.starts_with('/') && !crate::completer::Completer::is_command(input) {
@@ -1378,6 +1442,27 @@ impl App {
         self.screen.push(Block::Exec {
             command: cmd.to_string(),
             output,
+        });
+        self.screen.flush_blocks();
+    }
+
+    fn fork_session(&mut self) {
+        if self.history.is_empty() {
+            self.screen.push(Block::Error {
+                message: "nothing to fork".into(),
+            });
+            self.screen.flush_blocks();
+            return;
+        }
+        // Save current session first.
+        self.save_session();
+        // Create the fork.
+        let forked = self.session.fork();
+        let fork_id = forked.id.clone();
+        self.session = forked;
+        self.save_session();
+        self.screen.push(Block::Text {
+            content: format!("forked session {fork_id}"),
         });
         self.screen.flush_blocks();
     }
@@ -1461,7 +1546,8 @@ impl App {
     }
 
     fn resume_entries(&self) -> Vec<ResumeEntry> {
-        session::list_sessions()
+        let sessions = session::list_sessions();
+        let flat: Vec<ResumeEntry> = sessions
             .into_iter()
             .map(|s| ResumeEntry {
                 id: s.id,
@@ -1470,8 +1556,11 @@ impl App {
                 updated_at_ms: s.updated_at_ms,
                 created_at_ms: s.created_at_ms,
                 cwd: s.cwd,
+                parent_id: s.parent_id,
+                depth: 0,
             })
-            .collect()
+            .collect();
+        build_session_tree(flat)
     }
 
     // ── History / session ────────────────────────────────────────────────

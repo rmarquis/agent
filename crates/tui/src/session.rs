@@ -28,6 +28,8 @@ pub struct Session {
     #[serde(default)]
     pub cwd: Option<String>,
     #[serde(default)]
+    pub parent_id: Option<String>,
+    #[serde(default)]
     pub messages: Vec<Message>,
 }
 
@@ -50,6 +52,8 @@ pub struct SessionMeta {
     pub model: Option<String>,
     #[serde(default)]
     pub cwd: Option<String>,
+    #[serde(default)]
+    pub parent_id: Option<String>,
 }
 
 impl Default for Session {
@@ -75,6 +79,7 @@ impl Session {
             reasoning_effort: None,
             model: None,
             cwd,
+            parent_id: None,
             messages: Vec::new(),
         }
     }
@@ -90,6 +95,25 @@ impl Session {
             reasoning_effort: self.reasoning_effort,
             model: self.model.clone(),
             cwd: self.cwd.clone(),
+            parent_id: self.parent_id.clone(),
+        }
+    }
+
+    /// Create a fork: same content, new ID, parent_id pointing back.
+    pub fn fork(&self) -> Self {
+        let now = now_ms();
+        Self {
+            id: new_session_id(now),
+            title: self.title.clone(),
+            first_user_message: self.first_user_message.clone(),
+            created_at_ms: now,
+            updated_at_ms: now,
+            mode: self.mode.clone(),
+            reasoning_effort: self.reasoning_effort,
+            model: self.model.clone(),
+            cwd: self.cwd.clone(),
+            parent_id: Some(self.id.clone()),
+            messages: self.messages.clone(),
         }
     }
 }

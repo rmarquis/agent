@@ -138,18 +138,20 @@ Press `Shift+Tab` to cycle through modes:
 
 Type `/` to open the command picker:
 
-| Command            | Description                    |
-| ------------------ | ------------------------------ |
-| `/clear`, `/new`   | Start a new conversation       |
-| `/resume`          | Resume a saved session         |
-| `/model`           | Switch model                   |
-| `/compact`         | Compact conversation history   |
-| `/vim`             | Toggle vim mode                |
-| `/settings`        | Open settings menu             |
-| `/export`          | Copy conversation to clipboard |
-| `/stats`           | Show token usage statistics    |
-| `/ps`              | Manage background processes    |
-| `/exit` or `/quit` | Exit                           |
+| Command                    | Description                    |
+| -------------------------- | ------------------------------ |
+| `/clear`, `/new`           | Start a new conversation       |
+| `/resume`                  | Resume a saved session         |
+| `/model`                   | Switch model                   |
+| `/compact`                 | Compact conversation history   |
+| `/vim`                     | Toggle vim mode                |
+| `/settings`                | Open settings menu             |
+| `/export`                  | Copy conversation to clipboard |
+| `/fork`                    | Fork current session           |
+| `/stats`                   | Show token usage statistics    |
+| `/ps`                      | Manage background processes    |
+| `/exit`, `/quit`           | Exit                           |
+| `:q`, `:qa`, `:wq`, `:wqa` | Exit (vim-style)               |
 
 ## File References
 

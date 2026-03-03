@@ -1104,15 +1104,17 @@ impl ResumeDialog {
                 let title = resume_title(entry);
                 let time_ago = session::time_ago(resume_ts(entry), now_ms);
                 let time_len = time_ago.chars().count() + 1;
-                let max_label = w.saturating_sub(time_len + 4);
+                let indent = 2 + entry.depth * 2;
+                let indent_str = " ".repeat(indent);
+                let max_label = w.saturating_sub(time_len + indent + 2);
                 let truncated = truncate_str_local(&title, max_label);
                 if i == self.selected {
-                    let _ = out.queue(Print("  "));
+                    let _ = out.queue(Print(&indent_str));
                     let _ = out.queue(SetForegroundColor(theme::ACCENT));
                     let _ = out.queue(Print(&truncated));
                     let _ = out.queue(ResetColor);
                 } else {
-                    let _ = out.queue(Print("  "));
+                    let _ = out.queue(Print(&indent_str));
                     let _ = out.queue(Print(&truncated));
                 }
                 let _ = out.queue(Print(" "));

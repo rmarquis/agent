@@ -96,6 +96,9 @@ pub struct ResumeEntry {
     pub updated_at_ms: u64,
     pub created_at_ms: u64,
     pub cwd: Option<String>,
+    pub parent_id: Option<String>,
+    /// Nesting depth for display (0 = root, 1 = fork, etc.)
+    pub depth: usize,
 }
 
 #[derive(Clone)]
