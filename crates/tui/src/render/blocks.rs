@@ -572,32 +572,36 @@ pub(super) fn wrap_line(line: &str, max_cols: usize) -> Vec<String> {
         return vec![line.to_string()];
     }
     let mut segments: Vec<String> = Vec::new();
-    let mut current = String::new();
-    let mut col = 0;
 
-    for word in line.split_inclusive(' ') {
-        let wlen = word.chars().count();
-        if col + wlen > max_cols && col > 0 {
-            segments.push(current);
-            current = String::new();
-            col = 0;
-        }
-        if wlen > max_cols {
-            for ch in word.chars() {
-                if col >= max_cols {
-                    segments.push(current);
-                    current = String::new();
-                    col = 0;
-                }
-                current.push(ch);
-                col += 1;
+    for physical_line in line.split('\n') {
+        let physical_line = physical_line.trim_end_matches('\r');
+        let mut current = String::new();
+        let mut col = 0;
+
+        for word in physical_line.split_inclusive(' ') {
+            let wlen = word.chars().count();
+            if col + wlen > max_cols && col > 0 {
+                segments.push(current);
+                current = String::new();
+                col = 0;
             }
-        } else {
-            current.push_str(word);
-            col += wlen;
+            if wlen > max_cols {
+                for ch in word.chars() {
+                    if col >= max_cols {
+                        segments.push(current);
+                        current = String::new();
+                        col = 0;
+                    }
+                    current.push(ch);
+                    col += 1;
+                }
+            } else {
+                current.push_str(word);
+                col += wlen;
+            }
         }
+        segments.push(current);
     }
-    segments.push(current);
     segments
 }
 
