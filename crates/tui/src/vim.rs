@@ -66,6 +66,8 @@ enum SubState {
     Ready,
     WaitingOp(Op),
     WaitingG,
+    /// Operator pending + `g` pressed, waiting for `g` to complete `gg` motion.
+    WaitingOpG(Op),
     WaitingR,
     WaitingFind(FindKind),
     /// Operator pending + find motion (e.g. `df`, `dt`), waiting for the target char.
@@ -216,6 +218,7 @@ impl Vim {
                 return self.handle_waiting_op_find(key, op, kind, buf, cpos)
             }
             SubState::WaitingG => return self.handle_waiting_g(key, buf, cpos),
+            SubState::WaitingOpG(op) => return self.handle_waiting_op_g(key, op, buf, cpos),
             SubState::WaitingTextObj(op, inner) => {
                 return self.handle_waiting_textobj(key, op, inner, buf, cpos)
             }
@@ -850,6 +853,55 @@ impl Vim {
         Action::Consumed
     }
 
+    fn handle_waiting_op_g(
+        &mut self,
+        key: KeyEvent,
+        op: Op,
+        buf: &mut String,
+        cpos: &mut usize,
+    ) -> Action {
+        self.sub = SubState::Ready;
+        if let KeyCode::Char('g') = key.code {
+            let target = if let Some(n) = self.count1.take() {
+                goto_line(buf, n.saturating_sub(1))
+            } else {
+                0
+            };
+            let origin = *cpos;
+            let (start, end) = if target < origin {
+                (target, origin)
+            } else {
+                (origin, target)
+            };
+            if start != end {
+                match op {
+                    Op::Delete => {
+                        self.save_undo(buf, *cpos);
+                        self.yank(&buf[start..end], false);
+                        buf.drain(start..end);
+                        *cpos = start;
+                        clamp_normal(buf, cpos);
+                    }
+                    Op::Change => {
+                        self.save_undo(buf, *cpos);
+                        self.yank(&buf[start..end], false);
+                        buf.drain(start..end);
+                        *cpos = start;
+                        self.enter_insert_mode();
+                        self.reset_counts();
+                        return Action::Consumed;
+                    }
+                    Op::Yank => {
+                        self.yank(&buf[start..end], false);
+                        *cpos = start;
+                    }
+                }
+            }
+        }
+        self.reset_pending();
+        Action::Consumed
+    }
+
     fn handle_waiting_textobj(
         &mut self,
         key: KeyEvent,
@@ -969,7 +1021,7 @@ impl Vim {
             KeyCode::Char('G') => Some(buf.len()),
             KeyCode::Char('g') => {
                 // Wait for 'g' → gg.
-                self.sub = SubState::WaitingG;
+                self.sub = SubState::WaitingOpG(op);
                 return Action::Consumed;
             }
             KeyCode::Char('f') => {
