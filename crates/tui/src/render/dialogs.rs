@@ -1895,8 +1895,8 @@ impl HelpDialog {
             .sum::<usize>()
             .saturating_sub(1); // no trailing blank after last section
 
-        // bar(1) + title(1) + blank(1) + content
-        let total_rows = (1 + 1 + 1 + content_rows) as u16;
+        // bar(1) + title(1) + blank(1) + content + footer(1)
+        let total_rows = (1 + 1 + 1 + content_rows + 1) as u16;
 
         begin_dialog_draw(&mut out, start_row);
 
@@ -1929,6 +1929,9 @@ impl HelpDialog {
             }
         }
 
+        let _ = out.queue(SetAttribute(Attribute::Dim));
+        let _ = out.queue(Print(" esc: close"));
+        let _ = out.queue(SetAttribute(Attribute::Reset));
         end_dialog_draw(&mut out, start_row, total_rows, height)
     }
 }
