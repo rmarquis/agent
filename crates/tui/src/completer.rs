@@ -129,13 +129,16 @@ impl Completer {
         if self.query.is_empty() {
             self.results = self.all_items.clone();
         } else {
-            let q = self.query.to_lowercase();
-            self.results = self
+            let mut scored: Vec<_> = self
                 .all_items
                 .iter()
-                .filter(|item| fuzzy_match(&item.label, &q))
-                .cloned()
+                .filter_map(|item| {
+                    crate::fuzzy::fuzzy_score(&item.label, &self.query)
+                        .map(|s| (s, item.clone()))
+                })
                 .collect();
+            scored.sort_by_key(|(s, _)| *s);
+            self.results = scored.into_iter().map(|(_, item)| item).collect();
         }
         if self.selected >= self.results.len() {
             self.selected = 0;
@@ -172,21 +175,6 @@ impl Clone for CompletionItem {
     }
 }
 
-/// Fuzzy match: all query chars appear in order in the path (case-insensitive).
-fn fuzzy_match(path: &str, query: &str) -> bool {
-    let lower = path.to_lowercase();
-    let mut hay = lower.chars().peekable();
-    for qc in query.chars() {
-        loop {
-            match hay.next() {
-                Some(pc) if pc == qc => break,
-                Some(_) => continue,
-                None => return false,
-            }
-        }
-    }
-    true
-}
 
 /// Get tracked + untracked (but not ignored) files and directories via git.
 fn git_files() -> Vec<String> {

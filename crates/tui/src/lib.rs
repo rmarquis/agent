@@ -1,6 +1,7 @@
 pub mod app;
 pub mod completer;
 pub mod config;
+pub mod fuzzy;
 pub mod input;
 pub mod instructions;
 pub mod perf;

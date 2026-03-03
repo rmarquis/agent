@@ -1781,25 +1781,10 @@ fn filter_resume_entries(
                 hay.push(' ');
                 hay.push_str(subtitle);
             }
-            fuzzy_match(&hay, &q)
+            crate::fuzzy::fuzzy_match(&hay, &q)
         })
         .cloned()
         .collect()
-}
-
-fn fuzzy_match(text: &str, query: &str) -> bool {
-    let lower = text.to_lowercase();
-    let mut hay = lower.chars().peekable();
-    for qc in query.chars() {
-        loop {
-            match hay.next() {
-                Some(pc) if pc == qc => break,
-                Some(_) => continue,
-                None => return false,
-            }
-        }
-    }
-    true
 }
 
 fn truncate_str_local(s: &str, max: usize) -> String {
