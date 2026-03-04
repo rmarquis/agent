@@ -1022,24 +1022,19 @@ impl Screen {
             }
         }
         if let Some(tokens) = self.context_tokens {
+            if !right_spans.is_empty() {
+                right_spans.push(BarSpan {
+                    text: " ·".into(),
+                    color: bar_color,
+                    attr: None,
+                    priority: 2,
+                });
+            }
             right_spans.push(BarSpan {
-                text: " · ".into(),
-                color: bar_color,
-                attr: None,
-                priority: 1,
-            });
-            right_spans.push(BarSpan {
-                text: format!("{} ", format_tokens(tokens)),
+                text: format!(" {} ", format_tokens(tokens)),
                 color: theme::MUTED,
                 attr: None,
                 priority: 1,
-            });
-        } else if !right_spans.is_empty() {
-            right_spans.push(BarSpan {
-                text: " ".into(),
-                color: theme::MUTED,
-                attr: None,
-                priority: 0,
             });
         }
         if self.running_procs > 0 {
