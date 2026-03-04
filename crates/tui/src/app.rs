@@ -5,7 +5,7 @@ use crate::render::{
 };
 use crate::session::Session;
 use crate::{render, session, state, vim};
-use engine::EngineHandle;
+use engine::{EngineHandle, Permissions};
 use protocol::{Content, EngineEvent, Message, Mode, ReasoningEffort, Role, UiCommand};
 
 use crossterm::{
@@ -45,6 +45,7 @@ pub struct App {
     pending_title: bool,
     last_width: u16,
     last_height: u16,
+    permissions: Permissions,
 }
 
 struct TurnState {
@@ -318,6 +319,7 @@ impl App {
             pending_title: false,
             last_width: terminal::size().map(|(w, _)| w).unwrap_or(80),
             last_height: terminal::size().map(|(_, h)| h).unwrap_or(24),
+            permissions: Permissions::load(),
         }
     }
 
@@ -510,19 +512,30 @@ impl App {
                             summary,
                             request_id,
                         } => {
-                            self.screen.set_active_status(ToolStatus::Confirm);
-                            self.render_screen();
-                            active_dialog = Some(ActiveDialog::Confirm {
-                                dialog: ConfirmDialog::new(
-                                    &tool_name,
-                                    &desc,
-                                    &args,
-                                    approval_pattern.as_deref(),
-                                    summary.as_deref(),
-                                ),
-                                tool_name,
-                                request_id,
-                            });
+                            // Re-check permissions with current mode.
+                            // If mode changed to one that allows this tool, auto-approve.
+                            let decision = self.permissions.check_tool(self.mode, &tool_name);
+                            if decision == engine::permissions::Decision::Allow {
+                                self.engine.send(UiCommand::PermissionDecision {
+                                    request_id,
+                                    approved: true,
+                                    message: None,
+                                });
+                            } else {
+                                self.screen.set_active_status(ToolStatus::Confirm);
+                                self.render_screen();
+                                active_dialog = Some(ActiveDialog::Confirm {
+                                    dialog: ConfirmDialog::new(
+                                        &tool_name,
+                                        &desc,
+                                        &args,
+                                        approval_pattern.as_deref(),
+                                        summary.as_deref(),
+                                    ),
+                                    tool_name,
+                                    request_id,
+                                });
+                            }
                         }
                         DeferredDialog::AskQuestion { args, request_id } => {
                             self.render_screen();
@@ -2233,6 +2246,17 @@ impl App {
                 } else {
                     tool_name
                 };
+
+                // Check if current mode allows this tool without asking.
+                let decision = self.permissions.check_tool(self.mode, &tool_name);
+                if decision == engine::permissions::Decision::Allow {
+                    self.engine.send(UiCommand::PermissionDecision {
+                        request_id,
+                        approved: true,
+                        message: None,
+                    });
+                    return LoopAction::Continue;
+                }
 
                 // Check auto-approvals first (doesn't need UI).
                 if let Some(patterns) = self.auto_approved.get(&tool_name) {
