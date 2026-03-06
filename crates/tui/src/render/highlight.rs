@@ -793,7 +793,11 @@ pub(super) fn render_markdown_table(out: &mut RenderOut, lines: &[&str], dim: bo
                 ('\u{2500}'..='\u{257F}').contains(&ch) || ('\u{2580}'..='\u{259F}').contains(&ch);
             if is_border {
                 if !seg.is_empty() {
+                    let pad = seg.len() - strip_markdown_markers(&seg).len();
                     print_styled_dim(out, &seg, dim);
+                    if pad > 0 {
+                        let _ = out.queue(Print(" ".repeat(pad)));
+                    }
                     seg.clear();
                 }
                 if !in_border {
@@ -816,7 +820,11 @@ pub(super) fn render_markdown_table(out: &mut RenderOut, lines: &[&str], dim: bo
             }
         }
         if !seg.is_empty() {
+            let pad = seg.len() - strip_markdown_markers(&seg).len();
             print_styled_dim(out, &seg, dim);
+            if pad > 0 {
+                let _ = out.queue(Print(" ".repeat(pad)));
+            }
         }
         if in_border {
             let _ = out.queue(ResetColor);
@@ -824,4 +832,49 @@ pub(super) fn render_markdown_table(out: &mut RenderOut, lines: &[&str], dim: bo
         crlf(out);
     }
     rendered.lines().count() as u16
+}
+
+fn strip_markdown_markers(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let len = chars.len();
+    let mut out = String::with_capacity(len);
+    let mut i = 0;
+    while i < len {
+        if i + 1 < len && chars[i] == '*' && chars[i + 1] == '*' {
+            let mut j = i + 2;
+            while j + 1 < len && !(chars[j] == '*' && chars[j + 1] == '*') {
+                j += 1;
+            }
+            if j + 1 < len {
+                out.extend(&chars[i + 2..j]);
+                i = j + 2;
+                continue;
+            }
+        }
+        if chars[i] == '*' && i + 1 < len && chars[i + 1] != '*' {
+            let mut j = i + 1;
+            while j < len && chars[j] != '*' {
+                j += 1;
+            }
+            if j < len {
+                out.extend(&chars[i + 1..j]);
+                i = j + 1;
+                continue;
+            }
+        }
+        if chars[i] == '`' {
+            let mut j = i + 1;
+            while j < len && chars[j] != '`' {
+                j += 1;
+            }
+            if j < len {
+                out.extend(&chars[i + 1..j]);
+                i = j + 1;
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
 }
