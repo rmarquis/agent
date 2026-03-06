@@ -9,12 +9,12 @@ use crossterm::{
 };
 use engine::tools::ProcessInfo;
 use std::collections::HashMap;
-use std::io::{self, Write};
+use std::io::Write;
 use std::time::Instant;
 
 use super::blocks::wrap_line;
 use super::highlight::{count_inline_diff_rows, print_inline_diff, print_syntax_file};
-use super::{chunk_line, crlf, draw_bar, ConfirmChoice, ResumeEntry};
+use super::{chunk_line, crlf, draw_bar, ConfirmChoice, RenderOut, ResumeEntry};
 
 /// Maximum number of scrollable list items in a dialog.
 /// Subtracts 4 rows of overhead (bar, title, blank, footer).
@@ -22,10 +22,9 @@ fn max_dialog_items(start_row: u16, height: u16) -> usize {
     max_dialog_height(start_row, height).saturating_sub(4)
 }
 
-/// Maximum total rows a dialog may occupy. Clamped to the viewport so
-/// dialogs never push content into terminal scrollback.
-fn max_dialog_height(start_row: u16, height: u16) -> usize {
-    height.saturating_sub(start_row) as usize
+/// Maximum total rows a dialog may occupy. Capped at half the terminal height.
+fn max_dialog_height(_start_row: u16, height: u16) -> usize {
+    (height / 2) as usize
 }
 
 // ── TextArea ──────────────────────────────────────────────────────────────────
@@ -220,7 +219,7 @@ fn char_to_byte(s: &str, char_idx: usize) -> usize {
 /// to `text_col`. Returns the updated row and optional cursor (col, row) if
 /// `editing` is true.
 fn render_inline_textarea(
-    out: &mut io::Stdout,
+    out: &mut RenderOut,
     ta: &TextArea,
     editing: bool,
     text_col: u16,
@@ -246,23 +245,50 @@ fn render_inline_textarea(
     (row, cursor_pos)
 }
 
-/// Begin a dialog frame: synchronized update, hide cursor, move to start, clear.
-fn begin_dialog_draw(out: &mut io::Stdout, start_row: u16) {
+/// Begin a dialog frame: compute where the dialog starts, position the
+/// cursor there, and switch to overlay mode.
+///
+/// When the dialog is taller than the space below `start_row`, it expands
+/// upward, overlaying conversation content that will be restored when the
+/// dialog closes.
+fn begin_dialog_draw(
+    out: &mut RenderOut,
+    start_row: u16,
+    total_rows: u16,
+    height: u16,
+    anchor_row: &mut Option<u16>,
+) -> u16 {
     let _ = out.queue(terminal::BeginSynchronizedUpdate);
     let _ = out.queue(cursor::Hide);
-    let _ = out.queue(cursor::MoveTo(0, start_row));
-    let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
+
+    let bar_row = if let Some(anchor) = *anchor_row {
+        anchor
+    } else {
+        // First draw: compute where the dialog starts.
+        let space_below = height.saturating_sub(start_row);
+        let row = if total_rows > space_below {
+            height.saturating_sub(total_rows)
+        } else {
+            start_row
+        };
+        *anchor_row = Some(row);
+        row
+    };
+
+    let _ = out.queue(cursor::MoveTo(0, bar_row));
+    out.row = Some(bar_row);
+    bar_row
 }
 
 /// End a dialog frame: clear remainder, end sync update, flush.
-fn end_dialog_draw(out: &mut io::Stdout) {
+fn end_dialog_draw(out: &mut RenderOut) {
     let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
     let _ = out.queue(terminal::EndSynchronizedUpdate);
     let _ = out.flush();
 }
 
 /// Finish a dialog frame: optionally show cursor, end synchronized update, flush.
-fn finish_dialog_frame(out: &mut io::Stdout, cursor_pos: Option<(u16, u16)>, editing: bool) {
+fn finish_dialog_frame(out: &mut RenderOut, cursor_pos: Option<(u16, u16)>, editing: bool) {
     if editing {
         if let Some((col, r)) = cursor_pos {
             let _ = out.queue(cursor::MoveTo(col, r));
@@ -349,7 +375,7 @@ fn confirm_preview_row_count(tool_name: &str, args: &HashMap<String, serde_json:
 /// Render the syntax-highlighted preview for the confirm dialog.
 /// Renders at most `viewport` rows starting from `skip` into the full preview.
 fn render_confirm_preview(
-    out: &mut io::Stdout,
+    out: &mut RenderOut,
     tool_name: &str,
     args: &HashMap<String, serde_json::Value>,
     skip: u16,
@@ -390,11 +416,10 @@ pub struct ConfirmDialog {
     textarea: TextArea,
     editing: bool,
     dirty: bool,
-    last_bar_row: u16,
+    /// The anchor row where this dialog is positioned. None on first draw.
+    pub anchor_row: Option<u16>,
     /// Row where the options section begins (used for partial redraws).
     options_row: u16,
-    /// Total dialog rows from the previous frame (used to detect height changes).
-    last_total_rows: u16,
 }
 
 impl ConfirmDialog {
@@ -433,9 +458,8 @@ impl ConfirmDialog {
             selected: 0,
             textarea: TextArea::new(),
             editing: false,
-            last_bar_row: u16::MAX,
+            anchor_row: None,
             options_row: 0,
-            last_total_rows: 0,
             dirty: true,
         }
     }
@@ -535,11 +559,17 @@ impl ConfirmDialog {
         }
         self.dirty = false;
 
-        let mut out = io::stdout();
-        let _ = out.queue(terminal::BeginSynchronizedUpdate);
-        let _ = out.queue(cursor::Hide);
+        let mut out = RenderOut::scroll();
         let (width, height) = terminal::size().unwrap_or((80, 24));
         let w = width as usize;
+
+        let is_first_draw = self.anchor_row.is_none();
+
+        engine::log::entry(
+            engine::log::Level::Debug,
+            &format!("ConfirmDialog::draw start_row={start_row} height={height} first={is_first_draw} anchor={:?}", self.anchor_row),
+            &"",
+        );
 
         let ta_visible = self.editing || !self.textarea.is_empty();
         // Pre-compute text indent for the selected option to get wrap width
@@ -562,7 +592,7 @@ impl ConfirmDialog {
             .unwrap_or(0);
         let has_preview = self.total_preview > 0;
         // Fixed rows: bar + title + summary + separators(if preview) +
-        //             "Allow?" + options + ta_extra + footer
+        //             "Allow?" + options + ta_extra + blank + hint
         let fixed_rows: u16 = 1
             + title_rows
             + summary_rows
@@ -570,11 +600,12 @@ impl ConfirmDialog {
             + 1
             + self.options.len() as u16
             + ta_extra
-            + 1;
+            + 2;
 
-        let available = max_dialog_height(start_row, height) as u16;
+        // When there is preview content, allow the dialog to use the full
+        // terminal height by scrolling conversation content into scrollback.
         let viewport_rows: u16 = if has_preview {
-            let space = available.saturating_sub(fixed_rows);
+            let space = height.saturating_sub(fixed_rows);
             space.max(1).min(self.total_preview)
         } else {
             0
@@ -585,29 +616,46 @@ impl ConfirmDialog {
         self.preview_scroll = self.preview_scroll.min(max_scroll);
 
         let total_rows = fixed_rows + viewport_rows;
-        let bar_row = start_row;
 
-        // Partial redraw: when editing and the dialog height hasn't changed,
-        // skip re-rendering the static top portion (bar, title, preview, header)
-        // and only redraw from the options row down.
+        let bar_row = begin_dialog_draw(
+            &mut out,
+            start_row,
+            total_rows,
+            height,
+            &mut self.anchor_row,
+        );
+
+        engine::log::entry(
+            engine::log::Level::Debug,
+            &format!(
+                "ConfirmDialog: bar_row={bar_row} total_rows={total_rows} fixed={fixed_rows} viewport={viewport_rows} preview={}"
+                , self.total_preview
+            ),
+            &"",
+        );
+
+        // Where the options section should begin in the current layout.
+        let expected_options_row = bar_row
+            + 1
+            + title_rows
+            + summary_rows
+            + if has_preview { 2 + viewport_rows } else { 0 }
+            + 1;
+
+        // Partial redraw: when editing and the layout above the options
+        // hasn't shifted, skip re-rendering bar/title/preview/"Allow?" and
+        // only redraw from options_row down.
         let partial = self.editing
-            && self.last_total_rows == total_rows
+            && self.options_row == expected_options_row
             && self.options_row > 0
             && self.options_row >= bar_row;
 
         let mut row;
         if partial {
             row = self.options_row;
+            out.row = Some(row);
             let _ = out.queue(cursor::MoveTo(0, row));
-            let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
         } else {
-            let clear_from = bar_row.min(self.last_bar_row);
-            self.last_bar_row = bar_row;
-
-            let _ = out.queue(cursor::MoveTo(0, clear_from));
-            let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
-            let _ = out.queue(cursor::MoveTo(0, bar_row));
-
             row = bar_row;
 
             draw_bar(&mut out, w, None, None, theme::accent());
@@ -690,7 +738,6 @@ impl ConfirmDialog {
         }
 
         self.options_row = row;
-        self.last_total_rows = total_rows;
 
         let mut cursor_pos: Option<(u16, u16)> = None;
 
@@ -732,16 +779,24 @@ impl ConfirmDialog {
             }
         }
 
-        // footer
+        // footer: blank line + hint
+        crlf(&mut out);
         crlf(&mut out);
         let _ = out.queue(SetAttribute(Attribute::Dim));
         if self.editing {
             let _ = out.queue(Print(" enter: send  esc: cancel"));
         } else if !self.textarea.is_empty() {
             let _ = out.queue(Print(" enter: confirm with message  tab: edit"));
+        } else {
+            let _ = out.queue(Print(" enter: confirm  tab: add message  esc: cancel"));
         }
         let _ = out.queue(SetAttribute(Attribute::Reset));
-        let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
+        // Only clear below the dialog if there's actually viewport space left.
+        // When the dialog fills the full terminal, the cursor is at or past
+        // the bottom row — clearing there wipes the last visible option.
+        if out.row.is_some_and(|r| r < height) {
+            let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
+        }
 
         finish_dialog_frame(&mut out, cursor_pos, self.editing);
     }
@@ -756,6 +811,8 @@ pub struct RewindDialog {
     max_visible: usize,
     dirty: bool,
     pub restore_vim_insert: bool,
+    /// The anchor row where this dialog is positioned. None on first draw.
+    pub anchor_row: Option<u16>,
 }
 
 impl RewindDialog {
@@ -771,6 +828,7 @@ impl RewindDialog {
             max_visible,
             dirty: true,
             restore_vim_insert,
+            anchor_row: None,
         }
     }
 
@@ -783,6 +841,7 @@ impl RewindDialog {
         self.scroll_offset = self
             .scroll_offset
             .min(self.turns.len().saturating_sub(self.max_visible));
+        self.anchor_row = None;
         self.dirty = true;
     }
 
@@ -821,7 +880,7 @@ impl RewindDialog {
         }
         self.dirty = false;
 
-        let mut out = io::stdout();
+        let mut out = RenderOut::scroll();
         let (width, height) = terminal::size().unwrap_or((80, 24));
         let w = width as usize;
 
@@ -830,7 +889,14 @@ impl RewindDialog {
             .scroll_offset
             .min(self.turns.len().saturating_sub(self.max_visible));
 
-        begin_dialog_draw(&mut out, start_row);
+        let total_rows = (self.max_visible + 4) as u16; // bar + title + items + footer-blank + footer
+        begin_dialog_draw(
+            &mut out,
+            start_row,
+            total_rows,
+            height,
+            &mut self.anchor_row,
+        );
 
         draw_bar(&mut out, w, None, None, theme::accent());
         crlf(&mut out);
@@ -892,6 +958,8 @@ pub struct ResumeDialog {
     dirty: bool,
     pending_d: bool,
     last_drawn: Instant,
+    /// The anchor row where this dialog is positioned. None on first draw.
+    pub anchor_row: Option<u16>,
 }
 
 impl ResumeDialog {
@@ -911,6 +979,7 @@ impl ResumeDialog {
             dirty: true,
             pending_d: false,
             last_drawn: Instant::now(),
+            anchor_row: None,
         }
     }
 
@@ -939,6 +1008,7 @@ impl ResumeDialog {
     }
 
     pub fn handle_resize(&mut self, h: u16) {
+        self.anchor_row = None;
         self.recalculate_layout(h);
     }
 
@@ -1076,7 +1146,7 @@ impl ResumeDialog {
         self.dirty = false;
         self.last_drawn = Instant::now();
 
-        let mut out = io::stdout();
+        let mut out = RenderOut::scroll();
         let (width, height) = terminal::size().unwrap_or((80, 24));
         let w = width as usize;
 
@@ -1091,7 +1161,14 @@ impl ResumeDialog {
                 .min(self.filtered.len().saturating_sub(self.max_visible));
         }
 
-        begin_dialog_draw(&mut out, start_row);
+        let total_rows = (self.max_visible + 4) as u16;
+        begin_dialog_draw(
+            &mut out,
+            start_row,
+            total_rows,
+            height,
+            &mut self.anchor_row,
+        );
 
         let now_ms = session::now_ms();
 
@@ -1173,6 +1250,8 @@ pub struct PsDialog {
     max_visible: usize,
     dirty: bool,
     killed: Vec<String>,
+    /// The anchor row where this dialog is positioned. None on first draw.
+    pub anchor_row: Option<u16>,
 }
 
 impl PsDialog {
@@ -1188,6 +1267,7 @@ impl PsDialog {
             max_visible,
             dirty: true,
             killed: Vec::new(),
+            anchor_row: None,
         }
     }
 
@@ -1207,6 +1287,7 @@ impl PsDialog {
     }
 
     pub fn handle_resize(&mut self, h: u16) {
+        self.anchor_row = None;
         self.max_visible = max_dialog_items(h, h).min(self.procs.len().max(1));
         if self.procs.is_empty() {
             self.selected = 0;
@@ -1273,7 +1354,7 @@ impl PsDialog {
         self.procs = Self::fetch_procs(&self.registry, &self.killed);
         let now = std::time::Instant::now();
 
-        let mut out = io::stdout();
+        let mut out = RenderOut::scroll();
         let (width, height) = terminal::size().unwrap_or((80, 24));
         let w = width as usize;
 
@@ -1288,7 +1369,14 @@ impl PsDialog {
                 .min(self.procs.len().saturating_sub(self.max_visible));
         }
 
-        begin_dialog_draw(&mut out, start_row);
+        let total_rows = (self.max_visible + 4) as u16;
+        begin_dialog_draw(
+            &mut out,
+            start_row,
+            total_rows,
+            height,
+            &mut self.anchor_row,
+        );
 
         draw_bar(&mut out, w, None, None, theme::accent());
         crlf(&mut out);
@@ -1354,6 +1442,8 @@ pub struct QuestionDialog {
     visited: Vec<bool>,
     answered: Vec<bool>,
     dirty: bool,
+    /// The anchor row where this dialog is positioned. None on first draw.
+    pub anchor_row: Option<u16>,
 }
 
 impl QuestionDialog {
@@ -1374,6 +1464,7 @@ impl QuestionDialog {
             visited: vec![false; n],
             answered: vec![false; n],
             dirty: true,
+            anchor_row: None,
         }
     }
 
@@ -1488,10 +1579,8 @@ impl QuestionDialog {
         }
         self.dirty = false;
 
-        let mut out = io::stdout();
-        let _ = out.queue(terminal::BeginSynchronizedUpdate);
-        let _ = out.queue(cursor::Hide);
-        let (width, _height) = terminal::size().unwrap_or((80, 24));
+        let mut out = RenderOut::scroll();
+        let (width, height) = terminal::size().unwrap_or((80, 24));
         let w = width as usize;
 
         let ta = &self.other_areas[self.active_tab];
@@ -1506,11 +1595,16 @@ impl QuestionDialog {
         let other_wrap_w = width.saturating_sub(other_text_col) as usize;
 
         let q = &self.questions[self.active_tab];
-        let bar_row = start_row;
 
-        let _ = out.queue(cursor::MoveTo(0, bar_row));
-        let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
-
+        // Estimate total rows (capped at half terminal height).
+        let total_rows = max_dialog_height(start_row, height) as u16;
+        let bar_row = begin_dialog_draw(
+            &mut out,
+            start_row,
+            total_rows,
+            height,
+            &mut self.anchor_row,
+        );
         let mut row = bar_row;
 
         draw_bar(&mut out, w, None, None, theme::accent());
@@ -1805,6 +1899,8 @@ fn truncate_str_local(s: &str, max: usize) -> String {
 pub struct HelpDialog {
     dirty: bool,
     scroll_offset: usize,
+    /// The anchor row where this dialog is positioned. None on first draw.
+    pub anchor_row: Option<u16>,
 }
 
 impl Default for HelpDialog {
@@ -1818,6 +1914,7 @@ impl HelpDialog {
         Self {
             dirty: true,
             scroll_offset: 0,
+            anchor_row: None,
         }
     }
 
@@ -1826,6 +1923,7 @@ impl HelpDialog {
     }
 
     pub fn handle_resize(&mut self) {
+        self.anchor_row = None;
         self.dirty = true;
     }
 
@@ -1858,7 +1956,7 @@ impl HelpDialog {
         }
         self.dirty = false;
 
-        let mut out = io::stdout();
+        let mut out = RenderOut::scroll();
         let (width, height) = terminal::size().unwrap_or((80, 24));
         let w = width as usize;
 
@@ -1922,7 +2020,14 @@ impl HelpDialog {
         let max_scroll = total_content.saturating_sub(max_visible);
         self.scroll_offset = self.scroll_offset.min(max_scroll);
 
-        begin_dialog_draw(&mut out, start_row);
+        let total_rows = (fixed + max_visible) as u16;
+        begin_dialog_draw(
+            &mut out,
+            start_row,
+            total_rows,
+            height,
+            &mut self.anchor_row,
+        );
 
         draw_bar(&mut out, w, None, None, super::theme::accent());
         crlf(&mut out);

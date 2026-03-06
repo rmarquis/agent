@@ -8,14 +8,13 @@ use crossterm::{
     QueueableCommand,
 };
 use similar::{ChangeTag, TextDiff};
-use std::io;
 use std::path::Path;
 use std::sync::LazyLock;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::Style;
 use syntect::parsing::SyntaxSet;
 
-use super::{crlf, term_width};
+use super::{crlf, term_width, RenderOut};
 
 pub(super) static SYNTAX_SET: LazyLock<SyntaxSet> =
     LazyLock::new(SyntaxSet::load_defaults_newlines);
@@ -28,12 +27,7 @@ struct DiffLayout {
     max_content: usize,
 }
 
-pub(super) fn render_code_block(
-    out: &mut io::Stdout,
-    lines: &[&str],
-    lang: &str,
-    dim: bool,
-) -> u16 {
+pub(super) fn render_code_block(out: &mut RenderOut, lines: &[&str], lang: &str, dim: bool) -> u16 {
     let ext = match lang {
         "" => "txt",
         "js" | "javascript" => "js",
@@ -60,7 +54,7 @@ pub(super) fn render_code_block(
 }
 
 pub(super) fn render_highlighted(
-    out: &mut io::Stdout,
+    out: &mut RenderOut,
     lines: &[&str],
     syntax: &syntect::parsing::SyntaxReference,
     skip: u16,
@@ -109,7 +103,7 @@ pub(super) fn render_highlighted(
 }
 
 pub(super) fn print_syntax_file(
-    out: &mut io::Stdout,
+    out: &mut RenderOut,
     content: &str,
     path: &str,
     skip: u16,
@@ -239,7 +233,7 @@ fn compute_change_visibility(changes: &[DiffChange], ctx: usize) -> Vec<bool> {
 /// `skip` rows are computed but not emitted; up to `max_rows` visible rows
 /// are written to `out`.
 pub(super) fn print_inline_diff(
-    out: &mut io::Stdout,
+    out: &mut RenderOut,
     old: &str,
     new: &str,
     path: &str,
@@ -549,7 +543,7 @@ pub(super) fn count_inline_diff_rows(old: &str, new: &str, path: &str, anchor: &
 }
 
 fn print_diff_lines(
-    out: &mut io::Stdout,
+    out: &mut RenderOut,
     h: &mut HighlightLines,
     lines: &[&str],
     start_line: usize,
@@ -617,7 +611,7 @@ fn print_diff_lines(
 /// are suppressed. Returns the number of rows actually emitted.
 #[allow(clippy::too_many_arguments)]
 fn print_diff_lines_skip(
-    out: &mut io::Stdout,
+    out: &mut RenderOut,
     h: &mut HighlightLines,
     lines: &[&str],
     start_line: usize,
@@ -731,7 +725,7 @@ fn split_regions_into_rows(
 
 /// Print pre-split owned regions. Returns columns printed.
 fn print_split_regions(
-    out: &mut io::Stdout,
+    out: &mut RenderOut,
     regions: &[(Style, String)],
     bg: Option<Color>,
 ) -> usize {
@@ -756,7 +750,7 @@ fn print_split_regions(
     col
 }
 
-pub(super) fn render_markdown_table(out: &mut io::Stdout, lines: &[&str], dim: bool) -> u16 {
+pub(super) fn render_markdown_table(out: &mut RenderOut, lines: &[&str], dim: bool) -> u16 {
     let mut rows: Vec<Vec<String>> = Vec::new();
     for line in lines {
         let trimmed = line.trim().trim_start_matches('|').trim_end_matches('|');

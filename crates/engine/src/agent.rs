@@ -324,6 +324,16 @@ async fn run_turn(
         send_snapshot(&messages, event_tx);
 
         for tc in &tool_calls {
+            // Drain mode/cancel commands so mid-turn mode switches
+            // take effect before the next permission check.
+            loop {
+                match cmd_rx.try_recv() {
+                    Ok(UiCommand::SetMode { mode: new_mode }) => mode = new_mode,
+                    Ok(UiCommand::Cancel) => cancel.cancel(),
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
             if cancel.is_cancelled() {
                 break;
             }

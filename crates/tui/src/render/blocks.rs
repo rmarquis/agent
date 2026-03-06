@@ -7,13 +7,14 @@ use crossterm::{
     QueueableCommand,
 };
 use std::collections::HashMap;
-use std::io;
 use std::time::Duration;
 
 use super::highlight::{
     print_inline_diff, print_syntax_file, render_code_block, render_markdown_table,
 };
-use super::{chunk_line, crlf, truncate_str, Block, ConfirmChoice, ToolOutput, ToolStatus};
+use super::{
+    chunk_line, crlf, truncate_str, Block, ConfirmChoice, RenderOut, ToolOutput, ToolStatus,
+};
 
 /// Element types for spacing calculation.
 pub(super) enum Element<'a> {
@@ -46,7 +47,7 @@ pub(super) fn gap_between(above: &Element, below: &Element) -> u16 {
     }
 }
 
-pub(super) fn render_block(out: &mut io::Stdout, block: &Block, width: usize) -> u16 {
+pub(super) fn render_block(out: &mut RenderOut, block: &Block, width: usize) -> u16 {
     let _perf = crate::perf::begin("render_block");
     match block {
         Block::User { text } => {
@@ -198,7 +199,7 @@ pub(super) fn render_block(out: &mut io::Stdout, block: &Block, width: usize) ->
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_tool(
-    out: &mut io::Stdout,
+    out: &mut RenderOut,
     name: &str,
     summary: &str,
     args: &HashMap<String, serde_json::Value>,
@@ -258,7 +259,7 @@ pub(super) fn render_tool(
 }
 
 fn render_confirm_result(
-    out: &mut io::Stdout,
+    out: &mut RenderOut,
     tool: &str,
     desc: &str,
     choice: Option<ConfirmChoice>,
@@ -311,7 +312,7 @@ fn render_confirm_result(
 }
 
 fn print_tool_line(
-    out: &mut io::Stdout,
+    out: &mut RenderOut,
     name: &str,
     summary: &str,
     pill_color: Color,
@@ -346,7 +347,7 @@ fn print_tool_line(
 }
 
 fn print_tool_output(
-    out: &mut io::Stdout,
+    out: &mut RenderOut,
     name: &str,
     content: &str,
     is_error: bool,
@@ -394,19 +395,19 @@ fn print_tool_output(
     }
 }
 
-fn print_dim(out: &mut io::Stdout, text: &str) {
+fn print_dim(out: &mut RenderOut, text: &str) {
     let _ = out.queue(SetAttribute(Attribute::Dim));
     let _ = out.queue(Print(text));
     let _ = out.queue(SetAttribute(Attribute::Reset));
 }
 
-fn print_dim_count(out: &mut io::Stdout, count: usize, singular: &str, plural: &str) -> u16 {
+fn print_dim_count(out: &mut RenderOut, count: usize, singular: &str, plural: &str) -> u16 {
     print_dim(out, &format!("   {}", pluralize(count, singular, plural)));
     crlf(out);
     1
 }
 
-fn render_edit_output(out: &mut io::Stdout, args: &HashMap<String, serde_json::Value>) -> u16 {
+fn render_edit_output(out: &mut RenderOut, args: &HashMap<String, serde_json::Value>) -> u16 {
     let old = args
         .get("old_string")
         .and_then(|v| v.as_str())
@@ -423,13 +424,13 @@ fn render_edit_output(out: &mut io::Stdout, args: &HashMap<String, serde_json::V
     }
 }
 
-fn render_write_output(out: &mut io::Stdout, args: &HashMap<String, serde_json::Value>) -> u16 {
+fn render_write_output(out: &mut RenderOut, args: &HashMap<String, serde_json::Value>) -> u16 {
     let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
     let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
     print_syntax_file(out, content, path, 0, 0)
 }
 
-fn render_question_output(out: &mut io::Stdout, content: &str, width: usize) -> u16 {
+fn render_question_output(out: &mut RenderOut, content: &str, width: usize) -> u16 {
     let max_cols = width.saturating_sub(4);
     let mut rows = 0u16;
     if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(content) {
@@ -460,12 +461,12 @@ fn render_question_output(out: &mut io::Stdout, content: &str, width: usize) -> 
     rows
 }
 
-fn render_web_fetch_output(out: &mut io::Stdout, content: &str, width: usize) -> u16 {
+fn render_web_fetch_output(out: &mut RenderOut, content: &str, width: usize) -> u16 {
     render_markdown(out, content.trim(), width, "   ", true)
 }
 
 fn render_markdown(
-    out: &mut io::Stdout,
+    out: &mut RenderOut,
     content: &str,
     width: usize,
     indent: &str,
@@ -508,7 +509,7 @@ fn render_markdown(
     rows
 }
 
-fn render_bash_output(out: &mut io::Stdout, content: &str, is_error: bool, width: usize) -> u16 {
+fn render_bash_output(out: &mut RenderOut, content: &str, is_error: bool, width: usize) -> u16 {
     const MAX_LINES: usize = 20;
     let max_cols = width.saturating_sub(4); // "   " prefix + 1 margin
     let lines: Vec<&str> = content.lines().collect();
@@ -543,7 +544,7 @@ fn render_bash_output(out: &mut io::Stdout, content: &str, is_error: bool, width
     rows
 }
 
-fn render_default_output(out: &mut io::Stdout, content: &str, is_error: bool, width: usize) -> u16 {
+fn render_default_output(out: &mut RenderOut, content: &str, is_error: bool, width: usize) -> u16 {
     let preview = result_preview(content, 3);
     let max_cols = width.saturating_sub(4);
     let mut rows = 0u16;
@@ -569,7 +570,7 @@ fn pluralize(count: usize, singular: &str, plural: &str) -> String {
     }
 }
 
-fn print_error(out: &mut io::Stdout, msg: &str) {
+fn print_error(out: &mut RenderOut, msg: &str) {
     let _ = out.queue(SetForegroundColor(theme::TOOL_ERR));
     let _ = out.queue(Print(format!(" error: {}", msg)));
     let _ = out.queue(ResetColor);
@@ -628,7 +629,7 @@ pub(super) fn wrap_line(line: &str, max_cols: usize) -> Vec<String> {
     segments
 }
 
-pub(crate) fn print_styled_dim(out: &mut io::Stdout, text: &str, dim: bool) {
+pub(crate) fn print_styled_dim(out: &mut RenderOut, text: &str, dim: bool) {
     macro_rules! reset {
         () => {
             let _ = out.queue(SetAttribute(Attribute::Reset));

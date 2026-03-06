@@ -230,12 +230,30 @@ impl ActiveDialog {
 
     fn handle_resize(&mut self, _w: u16, h: u16) {
         match self {
-            ActiveDialog::Confirm { dialog, .. } => dialog.mark_dirty(),
-            ActiveDialog::AskQuestion { dialog, .. } => dialog.mark_dirty(),
+            ActiveDialog::Confirm { dialog, .. } => {
+                dialog.anchor_row = None;
+                dialog.mark_dirty();
+            }
+            ActiveDialog::AskQuestion { dialog, .. } => {
+                dialog.anchor_row = None;
+                dialog.mark_dirty();
+            }
             ActiveDialog::Ps(d) => d.handle_resize(h),
             ActiveDialog::Rewind(d) => d.handle_resize(h),
             ActiveDialog::Resume(d) => d.handle_resize(h),
             ActiveDialog::Help(d) => d.handle_resize(),
+        }
+    }
+
+    /// Get the anchor row where this dialog is positioned, if any.
+    fn dialog_anchor(&self) -> Option<u16> {
+        match self {
+            ActiveDialog::Confirm { dialog, .. } => dialog.anchor_row,
+            ActiveDialog::AskQuestion { dialog, .. } => dialog.anchor_row,
+            ActiveDialog::Ps(d) => d.anchor_row,
+            ActiveDialog::Rewind(d) => d.anchor_row,
+            ActiveDialog::Resume(d) => d.anchor_row,
+            ActiveDialog::Help(d) => d.anchor_row,
         }
     }
 }
@@ -525,8 +543,8 @@ impl App {
                                     message: None,
                                 });
                             } else {
+                                self.screen.flush_history_to_scrollback();
                                 self.screen.set_active_status(ToolStatus::Confirm);
-                                self.render_screen();
                                 active_dialog = Some(ActiveDialog::Confirm {
                                     dialog: ConfirmDialog::new(
                                         &tool_name,
@@ -541,7 +559,7 @@ impl App {
                             }
                         }
                         DeferredDialog::AskQuestion { args, request_id } => {
-                            self.render_screen();
+                            self.screen.flush_history_to_scrollback();
                             let questions = render::parse_questions(&args);
                             active_dialog = Some(ActiveDialog::AskQuestion {
                                 dialog: QuestionDialog::new(questions),
@@ -782,7 +800,7 @@ impl App {
                 match active_dialog.take().unwrap() {
                     ActiveDialog::Ps(mut d) => {
                         if let Some(_killed) = d.handle_key(code, modifiers) {
-                            self.screen.clear_dialog_area();
+                            self.screen.clear_dialog_area(d.anchor_row);
                         } else {
                             *active_dialog = Some(ActiveDialog::Ps(d));
                         }
@@ -798,7 +816,7 @@ impl App {
                             } else if restore {
                                 self.input.set_vim_mode(vim::ViMode::Insert);
                             }
-                            self.screen.clear_dialog_area();
+                            self.screen.clear_dialog_area(d.anchor_row);
                         } else {
                             *active_dialog = Some(ActiveDialog::Rewind(d));
                         }
@@ -819,7 +837,7 @@ impl App {
                                 }
                             }
                             if clear {
-                                self.screen.clear_dialog_area();
+                                self.screen.clear_dialog_area(d.anchor_row);
                             }
                         } else {
                             *active_dialog = Some(ActiveDialog::Resume(d));
@@ -838,7 +856,7 @@ impl App {
                                 &tool_name,
                                 agent,
                             );
-                            self.screen.clear_dialog_area();
+                            self.screen.clear_dialog_area(dialog.anchor_row);
                             if should_cancel && agent.is_some() {
                                 self.finish_turn(true);
                                 *agent = None;
@@ -857,7 +875,7 @@ impl App {
                     } => {
                         if let Some(answer) = dialog.handle_key(code, modifiers) {
                             let should_cancel = self.resolve_question(answer, request_id, agent);
-                            self.screen.clear_dialog_area();
+                            self.screen.clear_dialog_area(dialog.anchor_row);
                             if should_cancel && agent.is_some() {
                                 self.finish_turn(true);
                                 *agent = None;
@@ -868,7 +886,7 @@ impl App {
                     }
                     ActiveDialog::Help(mut d) => {
                         if d.handle_key(code, modifiers) {
-                            self.screen.clear_dialog_area();
+                            self.screen.clear_dialog_area(d.anchor_row);
                         } else {
                             *active_dialog = Some(ActiveDialog::Help(d));
                         }
@@ -1910,17 +1928,6 @@ impl App {
         self.engine.send(UiCommand::SetReasoningEffort { effort });
     }
 
-    pub fn render_screen(&mut self) {
-        self.screen.draw_frame(
-            render::term_width(),
-            Some(FramePrompt {
-                state: &self.input,
-                mode: self.mode,
-                queued: &self.queued_messages,
-            }),
-        );
-    }
-
     pub fn handle_engine_event(
         &mut self,
         ev: EngineEvent,
@@ -2293,11 +2300,13 @@ impl App {
                 }
 
                 // Close any non-blocking dialog (e.g. Ps) to make room.
-                if active_dialog.take().is_some() {
-                    self.screen.clear_dialog_area();
+                if let Some(prev) = active_dialog.take() {
+                    self.screen.clear_dialog_area(prev.dialog_anchor());
                 }
+                // Flush pending blocks in scroll mode so they enter
+                // scrollback before the dialog takes over rendering.
+                self.screen.flush_history_to_scrollback();
                 self.screen.set_active_status(ToolStatus::Confirm);
-                self.render_screen();
                 *active_dialog = Some(ActiveDialog::Confirm {
                     dialog: ConfirmDialog::new(
                         &tool_name,
@@ -2322,10 +2331,10 @@ impl App {
                 }
 
                 // Close any non-blocking dialog (e.g. Ps) to make room.
-                if active_dialog.take().is_some() {
-                    self.screen.clear_dialog_area();
+                if let Some(prev) = active_dialog.take() {
+                    self.screen.clear_dialog_area(prev.dialog_anchor());
                 }
-                self.render_screen();
+                self.screen.flush_history_to_scrollback();
                 let questions = render::parse_questions(&args);
                 *active_dialog = Some(ActiveDialog::AskQuestion {
                     dialog: QuestionDialog::new(questions),

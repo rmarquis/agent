@@ -31,12 +31,64 @@ pub struct FramePrompt<'a> {
     pub queued: &'a [String],
 }
 
+/// Output wrapper that selects the line-advance strategy.
+///
+/// * `row: None` — **scroll mode** (blocks / prompt): `\r\n` pushes content
+///   into terminal scrollback, which is the normal way conversation renders.
+/// * `row: Some(r)` — **overlay mode** (dialogs): `MoveTo(0, r+1)` repositions
+///   the cursor without scrolling, so dialogs never pollute scrollback.
+pub(super) struct RenderOut {
+    pub out: io::Stdout,
+    pub row: Option<u16>,
+}
+
+impl RenderOut {
+    /// Create a scroll-mode output (for blocks + prompt).
+    /// Dialogs switch to overlay mode by setting `out.row = Some(r)`.
+    pub fn scroll() -> Self {
+        Self {
+            out: io::stdout(),
+            row: None,
+        }
+    }
+}
+
+impl io::Write for RenderOut {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.out.write(buf)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.out.flush()
+    }
+}
+
 /// Clear remaining characters on the current line and advance to the next.
-/// Using Clear(UntilNewLine) before \r\n ensures old content doesn't leak
-/// through when overwriting in place (flicker-free rendering).
-pub(super) fn crlf(out: &mut io::Stdout) {
+///
+/// In scroll mode (`row: None`) this emits `\r\n`, pushing content into
+/// terminal scrollback.  In overlay mode (`row: Some`) it uses `MoveTo` to
+/// reposition without scrolling — dialogs use this to avoid polluting
+/// scrollback.
+#[track_caller]
+pub(super) fn crlf(out: &mut RenderOut) {
     let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
-    let _ = out.queue(Print("\r\n"));
+    if let Some(ref mut r) = out.row {
+        *r += 1;
+        let next = *r;
+        let _ = out.queue(cursor::MoveTo(0, next));
+    } else {
+        let caller = std::panic::Location::caller();
+        log(&format!(
+            "crlf SCROLL at {}:{}",
+            caller.file(),
+            caller.line()
+        ));
+        let _ = out.queue(Print("\r\n"));
+    }
+}
+
+#[track_caller]
+fn log(msg: &str) {
+    engine::log::entry(engine::log::Level::Debug, msg, &"");
 }
 
 const SPINNER_FRAMES: &[&str] = &["✿", "❀", "✾", "❁"];
@@ -191,7 +243,12 @@ impl BlockHistory {
     }
 
     /// Render unflushed blocks. Returns total rows printed.
-    fn render(&mut self, out: &mut io::Stdout, width: usize) -> u16 {
+    fn render(&mut self, out: &mut RenderOut, width: usize) -> u16 {
+        log(&format!(
+            "History::render flushed={} blocks={}",
+            self.flushed,
+            self.blocks.len()
+        ));
         if !self.has_unflushed() {
             return 0;
         }
@@ -207,8 +264,7 @@ impl BlockHistory {
                 0
             };
             for _ in 0..gap {
-                let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
-                let _ = out.queue(Print("\r\n"));
+                crlf(out);
             }
             let rows = render_block(out, &self.blocks[i], width);
             total += gap + rows;
@@ -439,6 +495,16 @@ pub struct Screen {
     /// Terminal row where block content starts (top of conversation).
     /// Set once when the first block is rendered; reset on purge/clear.
     content_start_row: Option<u16>,
+    /// Skip the next `render_pending_blocks` call.  Set by
+    /// `clear_dialog_area` so that `finish_turn` → `flush_blocks` doesn't
+    /// render blocks in scroll mode right after a dialog is dismissed (which
+    /// causes scrollback pollution on some terminals).  The blocks are
+    /// rendered by the next `draw_frame` instead.
+    defer_pending_render: bool,
+    /// Skip the next `redraw(true)` call.  Set by `clear_dialog_area` so
+    /// that spurious resize events in the same event batch don't re-render
+    /// all blocks in scroll mode (causing scrollback pollution on Ghostty).
+    defer_redraw: bool,
     /// A permission dialog is waiting for the user to stop typing.
     pending_dialog: bool,
     running_procs: usize,
@@ -463,6 +529,8 @@ impl Screen {
             reasoning_effort: Default::default(),
             has_scrollback: false,
             content_start_row: None,
+            defer_pending_render: false,
+            defer_redraw: false,
             pending_dialog: false,
             running_procs: 0,
             show_speed: true,
@@ -486,18 +554,28 @@ impl Screen {
         self.prompt.prev_dialog_row.unwrap_or(0)
     }
 
-    /// Clear the area occupied by a dismissed dialog and prepare the prompt
-    /// for re-rendering on the next tick.  Scrollback is never touched.
-    pub fn clear_dialog_area(&mut self) {
-        if let Some(row) = self.prompt.anchor_row {
-            let mut out = io::stdout();
-            let _ = out.queue(terminal::BeginSynchronizedUpdate);
+    /// Dismiss a dialog overlay.
+    ///
+    /// Clears from the dialog's anchor row down and lets the prompt redraw
+    /// at that position on the next tick.
+    pub fn clear_dialog_area(&mut self, dialog_anchor: Option<u16>) {
+        let anchor = dialog_anchor.unwrap_or(0);
+        log(&format!("clear_dialog_area anchor={anchor}"));
+
+        // Clear each row individually instead of using Clear(FromCursorDown).
+        // Some terminals (e.g. Ghostty) push the viewport into scrollback
+        // when Clear(FromCursorDown) is issued at row 0.
+        let height = terminal::size().map(|(_, h)| h).unwrap_or(24);
+        let mut out = RenderOut::scroll();
+        for row in anchor..height {
             let _ = out.queue(cursor::MoveTo(0, row));
-            let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
-            let _ = out.queue(terminal::EndSynchronizedUpdate);
-            let _ = out.flush();
+            let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
         }
-        self.prompt.drawn = false;
+        let _ = out.flush();
+        self.defer_pending_render = true;
+        self.defer_redraw = true;
+        self.prompt.anchor_row = Some(anchor);
+        self.prompt.drawn = true;
         self.prompt.dirty = true;
         self.prompt.prev_rows = 0;
     }
@@ -508,7 +586,7 @@ impl Screen {
             let anchor = self.prompt.anchor_row.unwrap_or(0);
             let end_row = anchor + self.prompt.prev_rows;
             let height = terminal::size().map(|(_, h)| h).unwrap_or(24);
-            let mut out = io::stdout();
+            let mut out = RenderOut::scroll();
             let _ = out.queue(cursor::MoveTo(0, end_row));
             // At the terminal bottom there's no row below to land on —
             // emit a newline so the shell prompt gets a fresh line.
@@ -649,8 +727,43 @@ impl Screen {
         self.prompt.dirty = true;
     }
 
+    /// Convert active tool to a history block and render any pending blocks.
     pub fn flush_blocks(&mut self) {
         let _perf = crate::perf::begin("flush_blocks");
+        self.commit_active_tool();
+        self.render_pending_blocks();
+    }
+
+    /// Render unflushed blocks and scroll all viewport content into
+    /// scrollback so the dialog gets a clean viewport.
+    pub fn flush_history_to_scrollback(&mut self) {
+        self.render_pending_blocks();
+
+        // Scroll viewport content into scrollback. Content rendered with
+        // \r\n only enters scrollback when lines are pushed off the top of
+        // the viewport. If the conversation fits on screen, it's still in
+        // the viewport — not in scrollback. ScrollUp(n) physically pushes
+        // the top n lines into scrollback.
+        let rows_to_scroll = self
+            .prompt
+            .anchor_row
+            .or(self.content_start_row)
+            .unwrap_or(0);
+        if rows_to_scroll > 0 {
+            let mut out = RenderOut::scroll();
+            let _ = out.queue(terminal::ScrollUp(rows_to_scroll));
+            let _ = out.flush();
+            self.prompt.anchor_row = Some(0);
+            self.prompt.drawn = false;
+            self.prompt.dirty = true;
+            self.has_scrollback = true;
+        }
+    }
+
+    /// Convert active tool to a history block without rendering.
+    /// Call before `finish_turn` when dismissing a dialog so that
+    /// `flush_blocks` won't re-render the tool in scroll mode.
+    pub fn commit_active_tool(&mut self) {
         if let Some(tool) = self.active_tool.take() {
             let elapsed = tool.elapsed();
             self.history.push(Block::ToolCall {
@@ -662,12 +775,21 @@ impl Screen {
                 output: tool.output,
                 user_message: tool.user_message,
             });
+            // Mark as flushed so render_pending_blocks won't render it.
+            self.history.flushed = self.history.blocks.len();
         }
-        self.render_pending_blocks();
     }
 
     fn render_pending_blocks(&mut self) {
-        let mut out = io::stdout();
+        if self.defer_pending_render {
+            self.defer_pending_render = false;
+            return;
+        }
+        if !self.history.has_unflushed() {
+            return;
+        }
+        log("render_pending_blocks");
+        let mut out = RenderOut::scroll();
         let _ = out.queue(terminal::BeginSynchronizedUpdate);
         let start_row = if self.prompt.drawn {
             let row = self.prompt.anchor_row.unwrap_or(0);
@@ -701,20 +823,38 @@ impl Screen {
     /// screen first — necessary after resize or when content has overflowed.
     /// When false, redraws over the current viewport (faster, no flash).
     pub fn redraw(&mut self, purge: bool) {
-        let mut out = io::stdout();
+        let purge = if self.defer_redraw {
+            self.defer_redraw = false;
+            false
+        } else {
+            purge
+        };
+        log(&format!("redraw purge={purge}"));
+        let mut out = RenderOut::scroll();
         let _ = out.queue(terminal::BeginSynchronizedUpdate);
-        if purge {
+        let start = if purge {
             let _ = out.queue(cursor::MoveTo(0, 0));
             let _ = out.queue(terminal::Clear(terminal::ClearType::All));
             let _ = out.queue(terminal::Clear(terminal::ClearType::Purge));
+            0
         } else {
-            let _ = out.queue(cursor::MoveTo(0, self.content_start_row.unwrap_or(0)));
-        }
+            let row = self.content_start_row.unwrap_or(0);
+            let _ = out.queue(cursor::MoveTo(0, row));
+            row
+        };
         self.history.flushed = 0;
         self.history.last_block_rows = 0;
         let block_rows = self.history.render(&mut out, term_width());
         if !purge {
-            let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
+            // Clear remaining rows individually — Clear(FromCursorDown) at
+            // low row numbers causes Ghostty to push the viewport into
+            // scrollback.
+            let cur_row = start + block_rows;
+            let height = terminal::size().map(|(_, h)| h).unwrap_or(24);
+            for row in cur_row..height {
+                let _ = out.queue(cursor::MoveTo(0, row));
+                let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
+            }
         }
         let _ = out.queue(terminal::EndSynchronizedUpdate);
         let _ = out.flush();
@@ -726,7 +866,6 @@ impl Screen {
             self.content_start_row = Some(0);
             self.prompt.anchor_row = Some(block_rows);
         } else {
-            let start = self.content_start_row.unwrap_or(0);
             self.prompt.anchor_row = Some(start + block_rows);
         }
     }
@@ -740,7 +879,7 @@ impl Screen {
         self.context_tokens = None;
         self.has_scrollback = false;
         self.content_start_row = None;
-        let mut out = io::stdout();
+        let mut out = RenderOut::scroll();
         let _ = out.queue(terminal::BeginSynchronizedUpdate);
         let _ = out.queue(cursor::MoveTo(0, 0));
         let _ = out.queue(terminal::Clear(terminal::ClearType::All));
@@ -803,20 +942,26 @@ impl Screen {
         }
 
         let has_new_blocks = self.history.has_unflushed();
+        let is_dialog = prompt.is_none();
 
         // Content-only (dialog overlay): only render when new blocks arrived.
         // The active tool is already on screen from before the dialog opened;
         // re-rendering it every tick would clear+redraw the dialog area and
         // cause visible flicker.
-        if prompt.is_none() && !has_new_blocks {
+        if is_dialog && !has_new_blocks {
             return false;
         }
         // Full mode: skip if nothing changed.
-        if prompt.is_some() && !has_new_blocks && !self.prompt.dirty {
+        if !is_dialog && !has_new_blocks && !self.prompt.dirty {
             return false;
         }
 
-        let mut out = io::stdout();
+        log(&format!(
+            "draw_frame: is_dialog={is_dialog} has_new_blocks={has_new_blocks} dirty={}",
+            self.prompt.dirty
+        ));
+
+        let mut out = RenderOut::scroll();
 
         // ── Position cursor ─────────────────────────────────────────────
         let draw_start_row = self
@@ -829,6 +974,12 @@ impl Screen {
         let _ = out.queue(cursor::Hide);
         if self.prompt.drawn {
             let _ = out.queue(cursor::MoveTo(0, draw_start_row));
+        }
+        // In content-only mode (dialog overlay), use overlay rendering so
+        // block output uses MoveTo instead of \r\n — preventing scrollback
+        // pollution before the dialog paints on top.
+        if is_dialog {
+            out.row = Some(draw_start_row);
         }
 
         // ── Render blocks ───────────────────────────────────────────────
@@ -843,8 +994,7 @@ impl Screen {
                 0
             };
             for _ in 0..tool_gap {
-                let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
-                let _ = out.queue(Print("\r\n"));
+                crlf(&mut out);
             }
             let rows = render_tool(
                 &mut out,
@@ -870,8 +1020,7 @@ impl Screen {
                 })
             };
             for _ in 0..gap {
-                let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
-                let _ = out.queue(Print("\r\n"));
+                crlf(&mut out);
             }
 
             let pre_prompt = block_rows + active_rows + gap;
@@ -921,8 +1070,7 @@ impl Screen {
             // `anchor_row`, pushing conversation up via terminal scroll
             // rather than overlaying it.
             let gap: u16 = if block_rows > 0 || active_rows > 0 {
-                let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
-                let _ = out.queue(Print("\r\n"));
+                crlf(&mut out);
                 1
             } else {
                 0
@@ -956,7 +1104,7 @@ impl Screen {
     #[allow(clippy::too_many_arguments)]
     fn draw_prompt_sections(
         &self,
-        out: &mut io::Stdout,
+        out: &mut RenderOut,
         state: &InputState,
         mode: protocol::Mode,
         width: usize,
@@ -1248,7 +1396,7 @@ impl Screen {
     }
 }
 
-fn render_stash(out: &mut io::Stdout, stash: &Option<InputSnapshot>, usable: usize) -> u16 {
+fn render_stash(out: &mut RenderOut, stash: &Option<InputSnapshot>, usable: usize) -> u16 {
     let Some(ref snap) = stash else {
         return 0;
     };
@@ -1273,7 +1421,7 @@ fn render_stash(out: &mut io::Stdout, stash: &Option<InputSnapshot>, usable: usi
     1
 }
 
-fn render_queued(out: &mut io::Stdout, queued: &[String], usable: usize) -> u16 {
+fn render_queued(out: &mut RenderOut, queued: &[String], usable: usize) -> u16 {
     // Mirrors Block::User rendering (blocks.rs) but with a 2-char indent
     // and no stripping of leading/trailing blank lines.
     let indent = 2usize;
@@ -1363,7 +1511,7 @@ pub(super) fn chunk_line(line: &str, width: usize) -> Vec<String> {
 }
 
 pub fn erase_prompt_at(row: u16) {
-    let mut out = io::stdout();
+    let mut out = RenderOut::scroll();
     let _ = out.queue(terminal::BeginSynchronizedUpdate);
     let _ = out.queue(cursor::MoveTo(0, row));
     let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
@@ -1508,7 +1656,7 @@ pub(super) struct BarSpan {
 }
 
 pub(super) fn draw_bar(
-    out: &mut io::Stdout,
+    out: &mut RenderOut,
     width: usize,
     left: Option<&[BarSpan]>,
     right: Option<&[BarSpan]>,
@@ -1755,7 +1903,7 @@ fn map_cursor(raw_cursor: usize, raw_buf: &str, spans: &[Span]) -> usize {
 }
 
 /// Render a line using pre-computed per-character span kinds.
-fn render_styled_chars(out: &mut io::Stdout, line: &str, kinds: &[SpanKind]) {
+fn render_styled_chars(out: &mut RenderOut, line: &str, kinds: &[SpanKind]) {
     let mut current = SpanKind::Plain;
     for (i, ch) in line.chars().enumerate() {
         let kind = kinds.get(i).copied().unwrap_or(SpanKind::Plain);
@@ -1776,7 +1924,7 @@ fn render_styled_chars(out: &mut io::Stdout, line: &str, kinds: &[SpanKind]) {
 }
 
 fn draw_completions(
-    out: &mut io::Stdout,
+    out: &mut RenderOut,
     completer: Option<&crate::completer::Completer>,
     max_rows: usize,
 ) -> usize {
@@ -1844,7 +1992,7 @@ fn draw_completions(
 }
 
 fn draw_menu(
-    out: &mut io::Stdout,
+    out: &mut RenderOut,
     ms: &crate::input::MenuState,
     max_rows: usize,
     reasoning_effort: protocol::ReasoningEffort,
@@ -1960,7 +2108,7 @@ fn draw_menu(
     }
 }
 
-fn draw_menu_row(out: &mut io::Stdout, label: &str, detail: &str, col: usize, selected: bool) {
+fn draw_menu_row(out: &mut RenderOut, label: &str, detail: &str, col: usize, selected: bool) {
     let _ = out.queue(Print("  "));
     if selected {
         let _ = out.queue(SetForegroundColor(theme::accent()));
@@ -1988,7 +2136,7 @@ const HEAT_COLORS: [Color; 4] = [
 const HEAT_CHAR: &str = "█";
 const HEAT_EMPTY: &str = "·";
 
-fn draw_stats(out: &mut io::Stdout, lines: &[crate::metrics::StatsLine], max_rows: usize) -> usize {
+fn draw_stats(out: &mut RenderOut, lines: &[crate::metrics::StatsLine], max_rows: usize) -> usize {
     use crate::metrics::StatsLine;
 
     let mut drawn = 0;
