@@ -574,7 +574,11 @@ impl Screen {
         let _ = out.flush();
         self.defer_pending_render = true;
         self.defer_redraw = true;
-        self.prompt.anchor_row = Some(anchor);
+        // Prefer the saved prompt-section anchor (set by draw_frame) over the
+        // dialog anchor.  The dialog starts *after* the gap between blocks and
+        // prompt, so using it directly would double-count the gap and shift the
+        // prompt down by one row on each open/dismiss cycle.
+        self.prompt.anchor_row = Some(self.prompt.anchor_row.unwrap_or(anchor));
         self.prompt.drawn = true;
         self.prompt.dirty = true;
         self.prompt.prev_rows = 0;
