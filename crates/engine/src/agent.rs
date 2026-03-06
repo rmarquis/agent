@@ -324,6 +324,10 @@ async fn run_turn(
         send_snapshot(&messages, event_tx);
 
         for tc in &tool_calls {
+            if cancel.is_cancelled() {
+                break;
+            }
+
             let args: HashMap<String, Value> =
                 serde_json::from_str(&tc.function.arguments).unwrap_or_default();
 
@@ -394,7 +398,7 @@ async fn run_turn(
                     });
 
                     let (approved, user_msg) =
-                        wait_for_permission(cmd_rx, request_id, &mut mode, &mut reasoning_effort)
+                        wait_for_permission(cmd_rx, request_id, &mut mode, &mut reasoning_effort, &cancel)
                             .await;
                     if !approved {
                         let denial = if let Some(ref msg) = user_msg {
@@ -417,7 +421,7 @@ async fn run_turn(
                     args: args.clone(),
                 });
                 let answer =
-                    wait_for_answer(cmd_rx, request_id, &mut mode, &mut reasoning_effort).await;
+                    wait_for_answer(cmd_rx, request_id, &mut mode, &mut reasoning_effort, &cancel).await;
                 ToolResult {
                     content: answer.unwrap_or_else(|| "no response".into()),
                     is_error: false,
@@ -556,6 +560,7 @@ async fn wait_for_permission(
     request_id: u64,
     mode: &mut Mode,
     reasoning_effort: &mut ReasoningEffort,
+    cancel: &tokio_util::sync::CancellationToken,
 ) -> (bool, Option<String>) {
     loop {
         match cmd_rx.recv().await {
@@ -568,7 +573,10 @@ async fn wait_for_permission(
             }
             Some(UiCommand::SetMode { mode: new_mode }) => *mode = new_mode,
             Some(UiCommand::SetReasoningEffort { effort }) => *reasoning_effort = effort,
-            Some(UiCommand::Cancel) => return (false, None),
+            Some(UiCommand::Cancel) => {
+                cancel.cancel();
+                return (false, None);
+            }
             None => return (false, None),
             _ => {}
         }
@@ -581,6 +589,7 @@ async fn wait_for_answer(
     request_id: u64,
     mode: &mut Mode,
     reasoning_effort: &mut ReasoningEffort,
+    cancel: &tokio_util::sync::CancellationToken,
 ) -> Option<String> {
     loop {
         match cmd_rx.recv().await {
@@ -590,7 +599,10 @@ async fn wait_for_answer(
             }) if id == request_id => return answer,
             Some(UiCommand::SetMode { mode: new_mode }) => *mode = new_mode,
             Some(UiCommand::SetReasoningEffort { effort }) => *reasoning_effort = effort,
-            Some(UiCommand::Cancel) => return None,
+            Some(UiCommand::Cancel) => {
+                cancel.cancel();
+                return None;
+            }
             None => return None,
             _ => {}
         }
