@@ -562,12 +562,11 @@ impl ConfirmDialog {
             .unwrap_or(0);
         let has_preview = self.total_preview > 0;
         // Fixed rows: bar + title + summary + separators(if preview) +
-        //             blank + "Allow?" + options + ta_extra + footer
+        //             "Allow?" + options + ta_extra + footer
         let fixed_rows: u16 = 1
             + title_rows
             + summary_rows
             + if has_preview { 2 } else { 0 }
-            + 1
             + 1
             + self.options.len() as u16
             + ta_extra
@@ -681,10 +680,6 @@ impl ConfirmDialog {
                 crlf(&mut out);
                 row += 1;
             }
-
-            // blank line before "Allow?"
-            crlf(&mut out);
-            row += 1;
 
             // "Allow?"
             let _ = out.queue(SetAttribute(Attribute::Dim));
