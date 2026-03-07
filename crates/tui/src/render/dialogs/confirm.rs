@@ -1,3 +1,6 @@
+use super::{
+    begin_dialog_draw, finish_dialog_frame, render_inline_textarea, DialogResult, TextArea,
+};
 use crate::render::blocks::wrap_line;
 use crate::render::highlight::{count_inline_diff_rows, print_inline_diff, print_syntax_file};
 use crate::render::{crlf, draw_bar, ConfirmChoice, RenderOut};
@@ -6,7 +9,6 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use crossterm::style::{Attribute, Print, ResetColor, SetAttribute, SetForegroundColor};
 use crossterm::{cursor, terminal, QueueableCommand};
 use std::collections::HashMap;
-use super::{begin_dialog_draw, finish_dialog_frame, render_inline_textarea, DialogResult, TextArea};
 
 /// Compute preview row count for the confirm dialog.
 fn confirm_preview_row_count(tool_name: &str, args: &HashMap<String, serde_json::Value>) -> u16 {

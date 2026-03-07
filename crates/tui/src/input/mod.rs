@@ -216,18 +216,25 @@ impl InputState {
         self.attachments = attachments;
     }
 
-    pub fn open_settings(&mut self, vim_enabled: bool, auto_compact: bool, show_speed: bool) {
+    pub fn open_settings(
+        &mut self,
+        vim_enabled: bool,
+        auto_compact: bool,
+        show_speed: bool,
+        restrict_to_workspace: bool,
+    ) {
         self.completer = None;
         self.menu = Some(MenuState {
             nav: Menu {
                 selected: 0,
-                len: 3,
+                len: 4,
                 select_on_enter: false,
             },
             kind: MenuKind::Settings {
                 vim_enabled,
                 auto_compact,
                 show_speed,
+                restrict_to_workspace,
             },
         });
     }
@@ -289,10 +296,12 @@ impl InputState {
                 vim_enabled,
                 auto_compact,
                 show_speed,
+                restrict_to_workspace,
             } => MenuResult::Settings {
                 vim: vim_enabled,
                 auto_compact,
                 show_speed,
+                restrict_to_workspace,
             },
             MenuKind::Model { .. } => MenuResult::Dismissed,
             MenuKind::Theme { original, .. } => {
@@ -308,7 +317,7 @@ impl InputState {
     pub fn menu_rows(&self) -> usize {
         match &self.menu {
             Some(ms) => match &ms.kind {
-                MenuKind::Settings { .. } => 3,
+                MenuKind::Settings { .. } => 4,
                 MenuKind::Model { models } => (models.len() + 2).min(12),
                 MenuKind::Theme { presets, .. } => presets.len().min(14),
                 MenuKind::Stats { lines } => lines
@@ -724,12 +733,14 @@ impl InputState {
                     ref mut vim_enabled,
                     ref mut auto_compact,
                     ref mut show_speed,
+                    ref mut restrict_to_workspace,
                 } = ms.kind
                 {
                     match idx {
                         0 => *vim_enabled ^= true,
                         1 => *auto_compact ^= true,
                         2 => *show_speed ^= true,
+                        3 => *restrict_to_workspace ^= true,
                         _ => {}
                     }
                 }

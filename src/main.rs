@@ -117,6 +117,7 @@ async fn main() {
     let vim_enabled = cfg.settings.vim_mode.unwrap_or(false);
     let auto_compact = cfg.settings.auto_compact.unwrap_or(false);
     let show_speed = cfg.settings.show_speed.unwrap_or(true);
+    let restrict_to_workspace = cfg.settings.restrict_to_workspace.unwrap_or(true);
 
     // Parse reasoning effort from defaults
     let reasoning_effort = cfg
@@ -202,7 +203,9 @@ async fn main() {
     let system_prompt = engine::build_system_prompt(initial_mode, &cwd, instructions.as_deref());
 
     // Start the engine
-    let permissions = engine::Permissions::load();
+    let mut permissions = engine::Permissions::load();
+    permissions.set_workspace(cwd.clone());
+    permissions.set_restrict_to_workspace(restrict_to_workspace);
     let initial_api_base = api_base.clone();
     let engine_handle = engine::start(engine::EngineConfig {
         api_base,
@@ -251,6 +254,7 @@ async fn main() {
         vim_enabled,
         auto_compact,
         show_speed,
+        restrict_to_workspace,
         reasoning_effort,
         shared_session,
         available_models,

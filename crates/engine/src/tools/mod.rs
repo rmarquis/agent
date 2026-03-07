@@ -105,7 +105,7 @@ pub fn tool_arg_summary(tool_name: &str, args: &HashMap<String, Value>) -> Strin
             .next()
             .unwrap_or("")
             .to_string(),
-        "read_file" | "write_file" | "edit_file" => str_arg(args, "file_path"),
+        "read_file" | "write_file" | "edit_file" => display_path(&str_arg(args, "file_path")),
         "glob" => str_arg(args, "pattern"),
         "grep" => str_arg(args, "pattern"),
         "web_fetch" => str_arg(args, "url"),
@@ -113,6 +113,21 @@ pub fn tool_arg_summary(tool_name: &str, args: &HashMap<String, Value>) -> Strin
         "read_process_output" | "stop_process" => str_arg(args, "id"),
         _ => String::new(),
     }
+}
+
+/// Convert an absolute path to a relative one if it's inside the cwd.
+pub fn display_path(path: &str) -> String {
+    if let Ok(cwd) = std::env::current_dir() {
+        let prefix = cwd.to_string_lossy();
+        if let Some(rest) = path.strip_prefix(prefix.as_ref()) {
+            let rest = rest.strip_prefix('/').unwrap_or(rest);
+            if rest.is_empty() {
+                return ".".into();
+            }
+            return rest.into();
+        }
+    }
+    path.into()
 }
 
 pub(crate) fn int_arg(args: &HashMap<String, Value>, key: &str) -> usize {

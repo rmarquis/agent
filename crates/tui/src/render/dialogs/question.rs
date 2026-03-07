@@ -1,3 +1,6 @@
+use super::{
+    begin_dialog_draw, finish_dialog_frame, render_inline_textarea, DialogResult, TextArea,
+};
 use crate::render::blocks::wrap_line;
 use crate::render::{crlf, draw_bar, RenderOut};
 use crate::theme;
@@ -6,10 +9,6 @@ use crossterm::style::{Attribute, Print, ResetColor, SetAttribute, SetForeground
 use crossterm::terminal;
 use crossterm::QueueableCommand;
 use std::collections::HashMap;
-use super::{
-    begin_dialog_draw, finish_dialog_frame, render_inline_textarea, DialogResult,
-    TextArea,
-};
 
 #[derive(Clone)]
 pub struct QuestionOption {
@@ -438,7 +437,11 @@ impl super::Dialog for QuestionDialog {
         let is_other_toggled = is_multi && self.multi_toggles[self.active_tab][other_idx];
 
         if is_multi {
-            let check = if is_other_toggled { "\u{25c9}" } else { "\u{25cb}" };
+            let check = if is_other_toggled {
+                "\u{25c9}"
+            } else {
+                "\u{25cb}"
+            };
             if is_other_current {
                 let _ = out.queue(SetForegroundColor(theme::accent()));
                 let _ = out.queue(Print(format!("{} Other", check)));

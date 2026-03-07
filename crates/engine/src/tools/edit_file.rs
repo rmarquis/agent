@@ -1,4 +1,4 @@
-use super::{bool_arg, hash_content, str_arg, FileHashes, Tool, ToolResult};
+use super::{bool_arg, display_path, hash_content, str_arg, FileHashes, Tool, ToolResult};
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -41,7 +41,7 @@ impl Tool for EditFileTool {
     }
 
     fn needs_confirm(&self, args: &HashMap<String, Value>) -> Option<String> {
-        Some(str_arg(args, "file_path"))
+        Some(display_path(&str_arg(args, "file_path")))
     }
 
     fn execute(&self, args: &HashMap<String, Value>) -> ToolResult {
@@ -119,7 +119,7 @@ impl Tool for EditFileTool {
                     map.insert(path.clone(), hash_content(&new_content));
                 }
                 ToolResult {
-                    content: format!("edited {}", path),
+                    content: format!("edited {}", display_path(&path)),
                     is_error: false,
                 }
             }

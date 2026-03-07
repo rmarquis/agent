@@ -282,7 +282,6 @@ impl BlockHistory {
     }
 }
 
-
 pub struct Screen {
     history: BlockHistory,
     active_tool: Option<ActiveTool>,
@@ -310,6 +309,9 @@ pub struct Screen {
     pending_dialog: bool,
     running_procs: usize,
     show_speed: bool,
+    /// Whether to render the active tool above the dialog in content-only
+    /// mode.  Set when tool + dialog fit on screen; cleared on dialog close.
+    show_tool_in_dialog: bool,
 }
 
 impl Default for Screen {
@@ -335,6 +337,7 @@ impl Screen {
             pending_dialog: false,
             running_procs: 0,
             show_speed: true,
+            show_tool_in_dialog: false,
         }
     }
 
@@ -350,6 +353,12 @@ impl Screen {
         }
     }
 
+    /// Whether to show the active tool above a dialog overlay.
+    pub fn set_show_tool_in_dialog(&mut self, show: bool) {
+        self.show_tool_in_dialog = show;
+        self.prompt.dirty = true;
+    }
+
     /// Row where a dialog should start rendering (lines up with the prompt bar).
     pub fn dialog_row(&self) -> u16 {
         self.prompt.prev_dialog_row.unwrap_or(0)
@@ -362,9 +371,19 @@ impl Screen {
     pub fn clear_dialog_area(&mut self, dialog_anchor: Option<u16>) {
         let anchor = dialog_anchor.unwrap_or(0);
         let screen_anchor = self.prompt.anchor_row.unwrap_or(anchor);
-        let clear_from = anchor.min(screen_anchor);
+
+        // Account for lines the dialog's ScrollUp pushed content upward.
+        // `prev_dialog_row` is where the dialog was *expected* to start;
+        // `anchor` is where it *actually* rendered (post-scroll).  The
+        // difference is the number of rows everything was shifted up.
+        let expected = self.prompt.prev_dialog_row.unwrap_or(anchor);
+        let scroll_deficit = expected.saturating_sub(anchor);
+        let adjusted_anchor = screen_anchor.saturating_sub(scroll_deficit);
+
+        let clear_from = anchor.min(adjusted_anchor);
         log(&format!(
-            "clear_dialog_area anchor={anchor} screen_anchor={screen_anchor} clear_from={clear_from}"
+            "clear_dialog_area anchor={anchor} screen_anchor={screen_anchor} \
+             scroll_deficit={scroll_deficit} clear_from={clear_from}"
         ));
 
         // Clear each row individually instead of using Clear(FromCursorDown).
@@ -379,8 +398,14 @@ impl Screen {
         let _ = out.flush();
         self.defer_pending_render = true;
         self.defer_redraw = true;
+        self.show_tool_in_dialog = false;
+        if scroll_deficit > 0 {
+            if let Some(ref mut cs) = self.content_start_row {
+                *cs = cs.saturating_sub(scroll_deficit);
+            }
+        }
         self.prompt.anchor_row = Some(clear_from);
-        self.prompt.drawn = false;
+        self.prompt.drawn = true;
         self.prompt.dirty = true;
         self.prompt.prev_rows = 0;
     }
@@ -447,6 +472,21 @@ impl Screen {
                 }
             }
             self.prompt.dirty = true;
+        } else if let Some(Block::ToolCall { ref mut output, .. }) = self.last_tool_block_mut() {
+            match output {
+                Some(ref mut out) => {
+                    if !out.content.is_empty() {
+                        out.content.push('\n');
+                    }
+                    out.content.push_str(chunk);
+                }
+                None => {
+                    *output = Some(ToolOutput {
+                        content: chunk.to_string(),
+                        is_error: false,
+                    });
+                }
+            }
         }
     }
 
@@ -458,6 +498,11 @@ impl Screen {
             }
             tool.status = status;
             self.prompt.dirty = true;
+        } else if let Some(Block::ToolCall {
+            status: ref mut s, ..
+        }) = self.last_tool_block_mut()
+        {
+            *s = status;
         }
     }
 
@@ -465,6 +510,12 @@ impl Screen {
         if let Some(ref mut tool) = self.active_tool {
             tool.user_message = Some(msg);
             self.prompt.dirty = true;
+        } else if let Some(Block::ToolCall {
+            ref mut user_message,
+            ..
+        }) = self.last_tool_block_mut()
+        {
+            *user_message = Some(msg);
         }
     }
 
@@ -481,6 +532,14 @@ impl Screen {
                 user_message: tool.user_message,
             });
             self.prompt.dirty = true;
+        } else if let Some(Block::ToolCall {
+            status: ref mut s,
+            output: ref mut o,
+            ..
+        }) = self.last_tool_block_mut()
+        {
+            *s = status;
+            *o = output;
         }
     }
 
@@ -574,17 +633,33 @@ impl Screen {
     /// it (along with any preceding reasoning blocks) before the dialog
     /// paints on top.
     pub fn commit_active_tool(&mut self) {
+        self.commit_active_tool_as(ToolStatus::Err);
+    }
+
+    pub fn commit_active_tool_as(&mut self, status: ToolStatus) {
         if let Some(tool) = self.active_tool.take() {
             let elapsed = tool.elapsed();
             self.history.push(Block::ToolCall {
                 name: tool.name,
                 summary: tool.summary,
                 args: tool.args,
-                status: ToolStatus::Err,
+                status,
                 elapsed,
                 output: tool.output,
                 user_message: tool.user_message,
             });
+        }
+    }
+
+    /// Get a mutable reference to the last history block if it's a ToolCall.
+    /// Updates data only — does NOT change flushed/anchor_row so there is no
+    /// risk of duplicate scroll-mode renders.
+    fn last_tool_block_mut(&mut self) -> Option<&mut Block> {
+        let idx = self.history.blocks.len().checked_sub(1)?;
+        if matches!(self.history.blocks[idx], Block::ToolCall { .. }) {
+            Some(&mut self.history.blocks[idx])
+        } else {
+            None
         }
     }
 
@@ -761,11 +836,9 @@ impl Screen {
         let has_new_blocks = self.history.has_unflushed();
         let is_dialog = prompt.is_none();
 
-        // Content-only (dialog overlay): only render when new blocks arrived.
-        // The active tool is already on screen from before the dialog opened;
-        // re-rendering it every tick would clear+redraw the dialog area and
-        // cause visible flicker.
-        if is_dialog && !has_new_blocks {
+        // Content-only (dialog overlay): only render when new blocks arrived
+        // or when the active tool should be shown and has changes.
+        if is_dialog && !has_new_blocks && !(self.show_tool_in_dialog && self.prompt.dirty) {
             return false;
         }
         // Full mode: skip if nothing changed.
@@ -804,27 +877,30 @@ impl Screen {
 
         // ── Render active tool ──────────────────────────────────────────
         let mut active_rows: u16 = 0;
-        if let Some(ref tool) = self.active_tool {
-            let tool_gap = if let Some(last) = self.history.blocks.last() {
-                gap_between(&Element::Block(last), &Element::ActiveTool)
-            } else {
-                0
-            };
-            for _ in 0..tool_gap {
-                crlf(&mut out);
+        let show_active = !is_dialog || self.show_tool_in_dialog;
+        if show_active {
+            if let Some(ref tool) = self.active_tool {
+                let tool_gap = if let Some(last) = self.history.blocks.last() {
+                    gap_between(&Element::Block(last), &Element::ActiveTool)
+                } else {
+                    0
+                };
+                for _ in 0..tool_gap {
+                    crlf(&mut out);
+                }
+                let rows = render_tool(
+                    &mut out,
+                    &tool.name,
+                    &tool.summary,
+                    &tool.args,
+                    tool.status,
+                    Some(tool.start_time.elapsed()),
+                    tool.output.as_ref(),
+                    tool.user_message.as_deref(),
+                    width,
+                );
+                active_rows = tool_gap + rows;
             }
-            let rows = render_tool(
-                &mut out,
-                &tool.name,
-                &tool.summary,
-                &tool.args,
-                tool.status,
-                Some(tool.start_time.elapsed()),
-                tool.output.as_ref(),
-                tool.user_message.as_deref(),
-                width,
-            );
-            active_rows = tool_gap + rows;
         }
 
         if let Some(p) = prompt {
@@ -910,8 +986,9 @@ impl Screen {
             self.prompt.drawn = true;
             self.prompt.dirty = false;
 
-            let _ = out.queue(terminal::EndSynchronizedUpdate);
-            let _ = out.flush();
+            // Leave the synchronized update open — the dialog that
+            // follows will end the sync and flush, so the terminal paints
+            // content + dialog as one atomic frame (no flicker).
             content_rows > 0
         }
     }
@@ -1818,11 +1895,13 @@ fn draw_menu(
             vim_enabled,
             auto_compact,
             show_speed,
+            restrict_to_workspace,
         } => {
             let rows: &[(&str, bool)] = &[
                 ("vim mode", *vim_enabled),
                 ("auto compact", *auto_compact),
                 ("show speed", *show_speed),
+                ("restrict to workspace", *restrict_to_workspace),
             ];
             let col = rows.iter().map(|(l, _)| l.len()).max().unwrap_or(0) + 4;
             let mut drawn = 0;

@@ -5,7 +5,7 @@
 cargo build
 
 # test
-cargo test
+cargo test --workspace
 
 # format and lint
 cargo fmt && cargo clippy

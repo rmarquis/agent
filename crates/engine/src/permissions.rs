@@ -1,7 +1,8 @@
 use protocol::Mode;
 use serde::Deserialize;
+use serde_json::Value;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
@@ -31,6 +32,7 @@ struct RawModePerms {
 struct RawPerms {
     normal: RawModePerms,
     apply: RawModePerms,
+    yolo: RawModePerms,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -58,6 +60,9 @@ pub struct Permissions {
     normal: ModePerms,
     plan: ModePerms,
     apply: ModePerms,
+    yolo: ModePerms,
+    restrict_to_workspace: bool,
+    workspace: PathBuf,
 }
 
 fn compile_patterns(raw: &[String]) -> Vec<glob::Pattern> {
@@ -81,65 +86,90 @@ fn build_tool_map(raw: &RawRuleSet) -> HashMap<String, Decision> {
     map
 }
 
+const DEFAULT_BASH_ALLOW: &[&str] = &["ls *", "grep *", "find *", "cat *", "tail *", "head *"];
+
 fn build_mode(raw: &RawModePerms, mode: Mode) -> ModePerms {
     let mut tools = build_tool_map(&raw.tools);
 
-    // Set default permissions for tools if not explicitly configured
-    // read_file: allow in both modes by default
-    tools
-        .entry("read_file".to_string())
-        .or_insert(Decision::Allow);
-
-    // edit_file: ask in normal mode, allow in apply mode
-    let default_edit_file = if mode == Mode::Apply {
-        Decision::Allow
+    if mode == Mode::Yolo {
+        // Yolo defaults: everything allowed unless explicitly overridden.
+        // Any tool not in the map will also default to Allow via check_tool().
+        for name in [
+            "read_file",
+            "edit_file",
+            "write_file",
+            "glob",
+            "grep",
+            "ask_user_question",
+            "bash",
+            "web_fetch",
+            "web_search",
+            "bash_background",
+            "read_process_output",
+            "stop_process",
+        ] {
+            tools.entry(name.to_string()).or_insert(Decision::Allow);
+        }
+        tools
+            .entry("exit_plan_mode".to_string())
+            .or_insert(Decision::Deny);
     } else {
-        Decision::Ask
-    };
-    tools
-        .entry("edit_file".to_string())
-        .or_insert(default_edit_file);
+        // read_file: allow in all non-yolo modes
+        tools
+            .entry("read_file".to_string())
+            .or_insert(Decision::Allow);
 
-    // write_file: ask in normal mode, allow in apply mode
-    let default_write_file = if mode == Mode::Apply {
-        Decision::Allow
-    } else {
-        Decision::Ask
-    };
-    tools
-        .entry("write_file".to_string())
-        .or_insert(default_write_file);
+        // edit_file: ask in normal/plan, allow in apply
+        let default_edit = if mode == Mode::Apply {
+            Decision::Allow
+        } else {
+            Decision::Ask
+        };
+        tools.entry("edit_file".to_string()).or_insert(default_edit);
 
-    // glob: always allow by default in both modes
-    tools.entry("glob".to_string()).or_insert(Decision::Allow);
+        // write_file: ask in normal/plan, allow in apply
+        let default_write = if mode == Mode::Apply {
+            Decision::Allow
+        } else {
+            Decision::Ask
+        };
+        tools
+            .entry("write_file".to_string())
+            .or_insert(default_write);
 
-    // grep: always allow by default in both modes
-    tools.entry("grep".to_string()).or_insert(Decision::Allow);
+        tools.entry("glob".to_string()).or_insert(Decision::Allow);
+        tools.entry("grep".to_string()).or_insert(Decision::Allow);
+        tools
+            .entry("ask_user_question".to_string())
+            .or_insert(Decision::Allow);
 
-    // ask_user_question: always allow
-    tools
-        .entry("ask_user_question".to_string())
-        .or_insert(Decision::Allow);
+        let default_exit_plan = if mode == Mode::Plan {
+            Decision::Allow
+        } else {
+            Decision::Deny
+        };
+        tools
+            .entry("exit_plan_mode".to_string())
+            .or_insert(default_exit_plan);
+    }
 
-    // exit_plan_mode: only in plan mode
-    let default_exit_plan = if mode == Mode::Plan {
-        Decision::Allow
-    } else {
-        Decision::Deny
-    };
-    tools
-        .entry("exit_plan_mode".to_string())
-        .or_insert(default_exit_plan);
-
-    const DEFAULT_BASH_ALLOW: &[&str] = &["ls *", "grep *", "find *", "cat *", "tail *", "head *"];
     let mut bash_allow = compile_patterns(&raw.bash.allow);
     if bash_allow.is_empty() {
-        bash_allow = compile_patterns(
-            &DEFAULT_BASH_ALLOW
-                .iter()
-                .map(|s| s.to_string())
-                .collect::<Vec<_>>(),
-        );
+        if mode == Mode::Yolo {
+            bash_allow = vec![glob::Pattern::new("*").unwrap()];
+        } else {
+            bash_allow = compile_patterns(
+                &DEFAULT_BASH_ALLOW
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>(),
+            );
+        }
+    }
+
+    let mut web_allow = compile_patterns(&raw.web_fetch.allow);
+    if mode == Mode::Yolo && web_allow.is_empty() {
+        web_allow = vec![glob::Pattern::new("*").unwrap()];
     }
 
     ModePerms {
@@ -150,7 +180,7 @@ fn build_mode(raw: &RawModePerms, mode: Mode) -> ModePerms {
             deny: compile_patterns(&raw.bash.deny),
         },
         web_fetch: RuleSet {
-            allow: compile_patterns(&raw.web_fetch.allow),
+            allow: web_allow,
             ask: compile_patterns(&raw.web_fetch.ask),
             deny: compile_patterns(&raw.web_fetch.deny),
         },
@@ -179,32 +209,45 @@ impl Permissions {
             normal: build_mode(&raw.permissions.normal, Mode::Normal),
             plan: build_mode(&raw.permissions.normal, Mode::Plan),
             apply: build_mode(&raw.permissions.apply, Mode::Apply),
+            yolo: build_mode(&raw.permissions.yolo, Mode::Yolo),
+            restrict_to_workspace: true,
+            workspace: PathBuf::new(),
+        }
+    }
+
+    pub fn set_workspace(&mut self, path: PathBuf) {
+        self.workspace = path;
+    }
+
+    pub fn restrict_to_workspace(&self) -> bool {
+        self.restrict_to_workspace
+    }
+
+    pub fn set_restrict_to_workspace(&mut self, val: bool) {
+        self.restrict_to_workspace = val;
+    }
+
+    fn mode_perms(&self, mode: Mode) -> &ModePerms {
+        match mode {
+            Mode::Normal => &self.normal,
+            Mode::Plan => &self.plan,
+            Mode::Apply => &self.apply,
+            Mode::Yolo => &self.yolo,
         }
     }
 
     pub fn check_tool(&self, mode: Mode, tool_name: &str) -> Decision {
-        if mode == Mode::Yolo {
-            return Decision::Allow;
-        }
-        let perms = match mode {
-            Mode::Normal => &self.normal,
-            Mode::Plan => &self.plan,
-            Mode::Apply => &self.apply,
-            Mode::Yolo => unreachable!(),
+        let perms = self.mode_perms(mode);
+        let default = if mode == Mode::Yolo {
+            Decision::Allow
+        } else {
+            Decision::Ask
         };
-        perms.tools.get(tool_name).cloned().unwrap_or(Decision::Ask)
+        perms.tools.get(tool_name).cloned().unwrap_or(default)
     }
 
     pub fn check_tool_pattern(&self, mode: Mode, tool_name: &str, pattern: &str) -> Decision {
-        if mode == Mode::Yolo {
-            return Decision::Allow;
-        }
-        let perms = match mode {
-            Mode::Normal => &self.normal,
-            Mode::Plan => &self.plan,
-            Mode::Apply => &self.apply,
-            Mode::Yolo => unreachable!(),
-        };
+        let perms = self.mode_perms(mode);
         let ruleset = match tool_name {
             "web_fetch" => &perms.web_fetch,
             _ => return Decision::Ask,
@@ -213,17 +256,7 @@ impl Permissions {
     }
 
     pub fn check_bash(&self, mode: Mode, command: &str) -> Decision {
-        if mode == Mode::Yolo {
-            return Decision::Allow;
-        }
-        let perms = match mode {
-            Mode::Normal => &self.normal,
-            Mode::Plan => &self.plan,
-            Mode::Apply => &self.apply,
-            Mode::Yolo => unreachable!(),
-        };
-        // Split on shell operators and check each sub-command independently.
-        // The most restrictive result wins (Deny > Ask > Allow).
+        let perms = self.mode_perms(mode);
         let command = command.trim();
         let subcmds = split_shell_commands(command);
         if subcmds.len() <= 1 {
@@ -239,6 +272,20 @@ impl Permissions {
             }
         }
         worst
+    }
+
+    /// Full permission decision for a tool call, including workspace restriction.
+    /// This is the single entry point used by both the engine and TUI.
+    pub fn decide(&self, mode: Mode, tool_name: &str, args: &HashMap<String, Value>) -> Decision {
+        let base = decide_base(self, mode, tool_name, args);
+        if base == Decision::Allow
+            && self.restrict_to_workspace
+            && !self.workspace.as_os_str().is_empty()
+            && has_paths_outside_workspace(tool_name, args, &self.workspace)
+        {
+            return Decision::Ask;
+        }
+        base
     }
 }
 
@@ -577,6 +624,140 @@ fn check_ruleset(ruleset: &RuleSet, value: &str) -> Decision {
     Decision::Ask
 }
 
+// ── Base decision (without workspace restriction) ────────────────────────────
+
+fn str_arg(args: &HashMap<String, Value>, key: &str) -> String {
+    args.get(key)
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+fn decide_base(
+    permissions: &Permissions,
+    mode: Mode,
+    tool_name: &str,
+    args: &HashMap<String, Value>,
+) -> Decision {
+    if tool_name == "bash" {
+        let cmd = str_arg(args, "command");
+        let tool_decision = permissions.check_tool(mode, "bash");
+        if tool_decision == Decision::Deny {
+            return Decision::Deny;
+        }
+        let bash_decision = permissions.check_bash(mode, &cmd);
+        match (&tool_decision, &bash_decision) {
+            (_, Decision::Deny) => Decision::Deny,
+            (Decision::Allow, Decision::Ask) => Decision::Allow,
+            _ => bash_decision,
+        }
+    } else if tool_name == "web_fetch" {
+        let url = str_arg(args, "url");
+        let tool_decision = permissions.check_tool(mode, "web_fetch");
+        if tool_decision == Decision::Deny {
+            return Decision::Deny;
+        }
+        let pattern_decision = permissions.check_tool_pattern(mode, "web_fetch", &url);
+        match (&tool_decision, &pattern_decision) {
+            (_, Decision::Deny) => Decision::Deny,
+            (_, Decision::Allow) => Decision::Allow,
+            (Decision::Allow, Decision::Ask) => Decision::Ask,
+            _ => pattern_decision,
+        }
+    } else {
+        permissions.check_tool(mode, tool_name)
+    }
+}
+
+// ── Workspace path restriction ───────────────────────────────────────────────
+
+fn extract_tool_paths(tool_name: &str, args: &HashMap<String, Value>) -> Vec<String> {
+    match tool_name {
+        "read_file" | "write_file" | "edit_file" => {
+            let p = str_arg(args, "file_path");
+            if p.is_empty() {
+                vec![]
+            } else {
+                vec![p]
+            }
+        }
+        "glob" | "grep" => {
+            let p = str_arg(args, "path");
+            if p.is_empty() {
+                vec![]
+            } else {
+                vec![p]
+            }
+        }
+        "bash" => extract_paths_from_command(&str_arg(args, "command")),
+        _ => vec![],
+    }
+}
+
+/// Extract tokens that look like absolute paths from a shell command.
+/// Relative paths are fine (they resolve within the workspace).
+fn extract_paths_from_command(cmd: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    for token in cmd.split_whitespace() {
+        let clean = token.trim_matches(|c: char| c == '\'' || c == '"' || c == ';');
+        if clean.starts_with('/') || clean.starts_with("~/") {
+            paths.push(clean.to_string());
+        }
+    }
+    paths
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut components = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                components.pop();
+            }
+            std::path::Component::CurDir => {}
+            c => components.push(c),
+        }
+    }
+    components.iter().collect()
+}
+
+fn resolve_path(path_str: &str, workspace: &Path) -> PathBuf {
+    if let Some(rest) = path_str.strip_prefix("~/") {
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/"));
+        let resolved = home.join(rest);
+        resolved
+            .canonicalize()
+            .unwrap_or_else(|_| normalize_path(&resolved))
+    } else if path_str.starts_with('/') {
+        let p = PathBuf::from(path_str);
+        p.canonicalize().unwrap_or_else(|_| normalize_path(&p))
+    } else {
+        let resolved = workspace.join(path_str);
+        resolved
+            .canonicalize()
+            .unwrap_or_else(|_| normalize_path(&resolved))
+    }
+}
+
+fn is_in_workspace(path_str: &str, workspace: &Path) -> bool {
+    let resolved = resolve_path(path_str, workspace);
+    let ws = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
+    resolved.starts_with(&ws)
+}
+
+fn has_paths_outside_workspace(
+    tool_name: &str,
+    args: &HashMap<String, Value>,
+    workspace: &Path,
+) -> bool {
+    let paths = extract_tool_paths(tool_name, args);
+    paths.iter().any(|p| !is_in_workspace(p, workspace))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -602,7 +783,10 @@ mod tests {
         Permissions {
             normal: mode.clone(),
             plan: mode.clone(),
-            apply: mode,
+            apply: mode.clone(),
+            yolo: mode,
+            restrict_to_workspace: false,
+            workspace: PathBuf::new(),
         }
     }
 
@@ -1149,5 +1333,270 @@ mod tests {
     #[test]
     fn newline_treated_as_separator() {
         assert_eq!(split_shell_commands("ls\nrm -rf /"), vec!["ls", "rm -rf /"]);
+    }
+
+    // ── workspace restriction ────────────────────────────────────────
+
+    fn perms_with_workspace(workspace: &str) -> Permissions {
+        let mode = ModePerms {
+            tools: {
+                let mut m = HashMap::new();
+                m.insert("read_file".to_string(), Decision::Allow);
+                m.insert("write_file".to_string(), Decision::Allow);
+                m.insert("edit_file".to_string(), Decision::Allow);
+                m.insert("glob".to_string(), Decision::Allow);
+                m.insert("grep".to_string(), Decision::Allow);
+                m.insert("bash".to_string(), Decision::Allow);
+                m
+            },
+            bash: RuleSet {
+                allow: vec![glob::Pattern::new("*").unwrap()],
+                ask: vec![],
+                deny: vec![],
+            },
+            web_fetch: RuleSet {
+                allow: vec![],
+                ask: vec![],
+                deny: vec![],
+            },
+        };
+        Permissions {
+            normal: mode.clone(),
+            plan: mode.clone(),
+            apply: mode.clone(),
+            yolo: mode,
+            restrict_to_workspace: true,
+            workspace: PathBuf::from(workspace),
+        }
+    }
+
+    fn args_with(key: &str, val: &str) -> HashMap<String, Value> {
+        let mut m = HashMap::new();
+        m.insert(key.to_string(), Value::String(val.to_string()));
+        m
+    }
+
+    // --- path extraction ---
+
+    #[test]
+    fn extract_paths_from_file_tools() {
+        assert_eq!(
+            extract_tool_paths("read_file", &args_with("file_path", "/etc/passwd")),
+            vec!["/etc/passwd"]
+        );
+        assert_eq!(
+            extract_tool_paths("write_file", &args_with("file_path", "relative.txt")),
+            vec!["relative.txt"]
+        );
+        assert_eq!(
+            extract_tool_paths("edit_file", &args_with("file_path", "")),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn extract_paths_from_glob_grep() {
+        assert_eq!(
+            extract_tool_paths("glob", &args_with("path", "/tmp")),
+            vec!["/tmp"]
+        );
+        assert_eq!(
+            extract_tool_paths("grep", &args_with("path", "")),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn extract_paths_from_bash() {
+        assert_eq!(
+            extract_tool_paths("bash", &args_with("command", "rm -rf /tmp/foo")),
+            vec!["/tmp/foo"]
+        );
+        assert_eq!(
+            extract_tool_paths("bash", &args_with("command", "ls relative/dir")),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            extract_tool_paths("bash", &args_with("command", "cat ~/secret.txt")),
+            vec!["~/secret.txt"]
+        );
+    }
+
+    #[test]
+    fn extract_paths_from_bash_strips_quotes() {
+        assert_eq!(
+            extract_tool_paths("bash", &args_with("command", "rm '/etc/passwd'")),
+            vec!["/etc/passwd"]
+        );
+    }
+
+    // --- is_in_workspace ---
+
+    #[test]
+    fn relative_path_in_workspace() {
+        assert!(is_in_workspace(
+            "src/main.rs",
+            Path::new("/home/user/project")
+        ));
+    }
+
+    #[test]
+    fn absolute_path_in_workspace() {
+        assert!(is_in_workspace(
+            "/home/user/project/src/main.rs",
+            Path::new("/home/user/project")
+        ));
+    }
+
+    #[test]
+    fn absolute_path_outside_workspace() {
+        assert!(!is_in_workspace(
+            "/etc/passwd",
+            Path::new("/home/user/project")
+        ));
+    }
+
+    #[test]
+    fn dotdot_escape_outside_workspace() {
+        assert!(!is_in_workspace(
+            "/home/user/project/../../etc/passwd",
+            Path::new("/home/user/project")
+        ));
+    }
+
+    #[test]
+    fn workspace_root_itself_is_in_workspace() {
+        assert!(is_in_workspace(
+            "/home/user/project",
+            Path::new("/home/user/project")
+        ));
+    }
+
+    // --- decide with workspace restriction ---
+
+    #[test]
+    fn workspace_allows_file_inside() {
+        let p = perms_with_workspace("/home/user/project");
+        let args = args_with("file_path", "/home/user/project/src/main.rs");
+        assert_eq!(p.decide(Mode::Normal, "read_file", &args), Decision::Allow);
+    }
+
+    #[test]
+    fn workspace_downgrades_file_outside() {
+        let p = perms_with_workspace("/home/user/project");
+        let args = args_with("file_path", "/etc/passwd");
+        assert_eq!(p.decide(Mode::Normal, "read_file", &args), Decision::Ask);
+    }
+
+    #[test]
+    fn workspace_allows_relative_path() {
+        let p = perms_with_workspace("/home/user/project");
+        let args = args_with("file_path", "src/main.rs");
+        assert_eq!(p.decide(Mode::Normal, "write_file", &args), Decision::Allow);
+    }
+
+    #[test]
+    fn workspace_downgrades_bash_outside() {
+        let p = perms_with_workspace("/home/user/project");
+        let args = args_with("command", "rm -rf /tmp/foo");
+        assert_eq!(p.decide(Mode::Normal, "bash", &args), Decision::Ask);
+    }
+
+    #[test]
+    fn workspace_allows_bash_inside() {
+        let p = perms_with_workspace("/home/user/project");
+        let args = args_with("command", "rm -rf /home/user/project/target");
+        assert_eq!(p.decide(Mode::Normal, "bash", &args), Decision::Allow);
+    }
+
+    #[test]
+    fn workspace_allows_bash_relative() {
+        let p = perms_with_workspace("/home/user/project");
+        let args = args_with("command", "cargo build");
+        assert_eq!(p.decide(Mode::Normal, "bash", &args), Decision::Allow);
+    }
+
+    #[test]
+    fn workspace_downgrades_yolo_outside() {
+        let p = perms_with_workspace("/home/user/project");
+        let args = args_with("command", "rm -rf /");
+        // Even in yolo, out-of-workspace should ask
+        assert_eq!(p.decide(Mode::Yolo, "bash", &args), Decision::Ask);
+    }
+
+    #[test]
+    fn workspace_yolo_allows_inside() {
+        let p = perms_with_workspace("/home/user/project");
+        let args = args_with("file_path", "/home/user/project/foo.txt");
+        assert_eq!(p.decide(Mode::Yolo, "write_file", &args), Decision::Allow);
+    }
+
+    #[test]
+    fn workspace_restriction_off_allows_everything() {
+        let mut p = perms_with_workspace("/home/user/project");
+        p.restrict_to_workspace = false;
+        let args = args_with("file_path", "/etc/passwd");
+        assert_eq!(p.decide(Mode::Normal, "read_file", &args), Decision::Allow);
+    }
+
+    #[test]
+    fn workspace_ask_stays_ask() {
+        // If the tool is already Ask (not Allow), workspace restriction doesn't change it
+        let mut p = perms_with_workspace("/home/user/project");
+        // Remove write_file from allowed tools so it defaults to Ask
+        p.normal.tools.remove("write_file");
+        let args = args_with("file_path", "/home/user/project/foo.txt");
+        // Even inside workspace, Ask stays Ask because the tool itself is Ask
+        assert_eq!(p.decide(Mode::Normal, "write_file", &args), Decision::Ask);
+    }
+
+    #[test]
+    fn workspace_glob_outside_downgrades() {
+        let p = perms_with_workspace("/home/user/project");
+        let args = args_with("path", "/tmp");
+        assert_eq!(p.decide(Mode::Normal, "glob", &args), Decision::Ask);
+    }
+
+    #[test]
+    fn workspace_no_path_tools_unaffected() {
+        let p = perms_with_workspace("/home/user/project");
+        let args = HashMap::new();
+        // web_search has no paths, should not be affected
+        assert_eq!(p.decide(Mode::Yolo, "web_search", &args), Decision::Allow);
+    }
+
+    // --- yolo mode is configurable ---
+
+    #[test]
+    fn yolo_defaults_to_allow() {
+        let p = Permissions::load();
+        assert_eq!(p.check_tool(Mode::Yolo, "bash"), Decision::Allow);
+        assert_eq!(p.check_tool(Mode::Yolo, "edit_file"), Decision::Allow);
+        assert_eq!(p.check_tool(Mode::Yolo, "write_file"), Decision::Allow);
+        assert_eq!(p.check_tool(Mode::Yolo, "read_file"), Decision::Allow);
+    }
+
+    #[test]
+    fn yolo_unknown_tool_defaults_allow() {
+        let p = Permissions::load();
+        assert_eq!(
+            p.check_tool(Mode::Yolo, "some_unknown_tool"),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn yolo_bash_allows_everything_by_default() {
+        let p = Permissions::load();
+        assert_eq!(p.check_bash(Mode::Yolo, "rm -rf /"), Decision::Allow);
+    }
+
+    #[test]
+    fn normal_unknown_tool_defaults_ask() {
+        let p = Permissions::load();
+        assert_eq!(
+            p.check_tool(Mode::Normal, "some_unknown_tool"),
+            Decision::Ask
+        );
     }
 }

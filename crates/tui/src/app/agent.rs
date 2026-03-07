@@ -464,24 +464,14 @@ impl App {
                 summary,
                 request_id,
             } => {
-                // Yolo mode: auto-approve everything.
-                if self.mode == Mode::Yolo {
-                    self.engine.send(UiCommand::PermissionDecision {
-                        request_id,
-                        approved: true,
-                        message: None,
-                    });
-                    return LoopAction::Continue;
-                }
-
                 let tool_name = if tool_name.is_empty() {
                     pending.as_ref().map(|p| p.name.clone()).unwrap_or_default()
                 } else {
                     tool_name
                 };
 
-                // Check if current mode allows this tool without asking.
-                let decision = self.permissions.check_tool(self.mode, &tool_name);
+                // Check full permission (mode rules + workspace restriction).
+                let decision = self.permissions.decide(self.mode, &tool_name, &args);
                 if decision == engine::permissions::Decision::Allow {
                     self.engine.send(UiCommand::PermissionDecision {
                         request_id,
@@ -524,8 +514,10 @@ impl App {
                 if let Some(prev) = active_dialog.take() {
                     self.screen.clear_dialog_area(prev.anchor_row());
                 }
-                self.screen.commit_active_tool();
                 self.screen.set_active_status(ToolStatus::Confirm);
+                // Show the tool above the dialog only if both fit on screen.
+                let height = terminal::size().map(|(_, h)| h).unwrap_or(24);
+                self.screen.set_show_tool_in_dialog(height >= 14);
                 *active_dialog = Some(Box::new(ConfirmDialog::new(
                     &tool_name,
                     &desc,
@@ -550,7 +542,9 @@ impl App {
                 if let Some(prev) = active_dialog.take() {
                     self.screen.clear_dialog_area(prev.anchor_row());
                 }
-                self.screen.commit_active_tool();
+                self.screen.set_active_status(ToolStatus::Confirm);
+                let height = terminal::size().map(|(_, h)| h).unwrap_or(24);
+                self.screen.set_show_tool_in_dialog(height >= 14);
                 let questions = render::parse_questions(&args);
                 *active_dialog = Some(Box::new(QuestionDialog::new(questions, request_id)));
                 LoopAction::Continue

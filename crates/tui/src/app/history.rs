@@ -100,7 +100,10 @@ impl App {
                 })) => {
                     if let Some(result) = dialog.handle_key(code, modifiers) {
                         terminal::disable_raw_mode().ok();
-                        if let render::DialogResult::Resume { session_id: Some(id) } = result {
+                        if let render::DialogResult::Resume {
+                            session_id: Some(id),
+                        } = result
+                        {
                             if let Some(loaded) = session::load(&id) {
                                 self.load_session(loaded);
                             }

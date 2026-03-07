@@ -45,6 +45,7 @@ settings:
   vim_mode: false # default
   auto_compact: false # default
   show_speed: true # default
+  restrict_to_workspace: true # default — downgrade Allow to Ask for out-of-workspace paths
 
 theme:
   accent: "lavender" # preset name or ANSI value (0-255)
@@ -68,6 +69,12 @@ permissions:
       allow: [read_file, glob, grep, edit_file, write_file]
     bash:
       allow: ["ls *", "grep *", "find *", "cat *", "tail *", "head *"]
+  # Yolo mode is configurable like other modes. Defaults to allowing everything.
+  yolo:
+    tools:
+      deny: []          # override to restrict specific tools
+    bash:
+      deny: ["rm -rf /*"]  # override to block dangerous patterns
 ```
 
 Providers is a list of named connections. Each provider has a `type` (currently
@@ -88,20 +95,27 @@ ice, sage, coral, silver) or by ANSI value (0-255).
 
 **Default tool permissions** (when `permissions` is omitted):
 
-| Tool                | Normal mode | Apply mode |
-| ------------------- | ----------- | ---------- |
-| `read_file`         | Allow       | Allow      |
-| `edit_file`         | Ask         | Allow      |
-| `write_file`        | Ask         | Allow      |
-| `glob`              | Allow       | Allow      |
-| `grep`              | Allow       | Allow      |
-| `ask_user_question` | Allow       | Allow      |
-| `bash`              | Ask         | Ask        |
-| `web_fetch`         | Ask         | Ask        |
-| `web_search`        | Ask         | Ask        |
+| Tool                | Normal mode | Apply mode | Yolo mode |
+| ------------------- | ----------- | ---------- | --------- |
+| `read_file`         | Allow       | Allow      | Allow     |
+| `edit_file`         | Ask         | Allow      | Allow     |
+| `write_file`        | Ask         | Allow      | Allow     |
+| `glob`              | Allow       | Allow      | Allow     |
+| `grep`              | Allow       | Allow      | Allow     |
+| `ask_user_question` | Allow       | Allow      | Allow     |
+| `bash`              | Ask         | Ask        | Allow     |
+| `web_fetch`         | Ask         | Ask        | Allow     |
+| `web_search`        | Ask         | Ask        | Allow     |
 
-Bash commands and web fetch URLs not matching any rule default to **Ask**. Deny
-rules always win.
+In Normal/Apply modes, unknown tools and unmatched bash/URL patterns default to
+**Ask**. In Yolo mode they default to **Allow**. Deny rules always win.
+
+**Workspace restriction** (`restrict_to_workspace: true`, the default):
+When a tool targets a path outside the current workspace, its permission is
+downgraded from Allow to Ask. This applies to all modes including Yolo — for
+example, `rm /etc/something` in Yolo mode will still show a confirmation dialog.
+Absolute paths within the workspace are treated the same as relative paths.
+The setting can also be toggled at runtime via `/settings`.
 
 **Domain permissions for `web_fetch`:** URL patterns use glob syntax to
 allow/deny fetching specific domains. When the agent asks to fetch a URL, the
@@ -131,7 +145,7 @@ Press `Shift+Tab` to cycle through modes:
 - **Normal** — default; agent asks before editing files or running commands
 - **Plan** — read-only tools only; agent thinks and plans without making changes
 - **Apply** — agent edits files and runs pre-approved commands without asking
-- **Yolo** — all permissions bypassed; agent runs anything without asking
+- **Yolo** — all permissions default to Allow; configurable via `permissions.yolo` in config
 
 ## Keybindings
 

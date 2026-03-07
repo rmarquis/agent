@@ -670,40 +670,15 @@ async fn compact_history(
     Ok(new_messages)
 }
 
+// decide_permission delegates to permissions.decide() which handles
+// tool-level, bash-command, web_fetch pattern, and workspace checks.
 fn decide_permission(
     permissions: &Permissions,
     mode: Mode,
     tool_name: &str,
     args: &HashMap<String, Value>,
 ) -> Decision {
-    if tool_name == "bash" {
-        let cmd = tools::str_arg(args, "command");
-        let tool_decision = permissions.check_tool(mode, "bash");
-        if tool_decision == Decision::Deny {
-            return Decision::Deny;
-        }
-        let bash_decision = permissions.check_bash(mode, &cmd);
-        match (&tool_decision, &bash_decision) {
-            (_, Decision::Deny) => Decision::Deny,
-            (Decision::Allow, Decision::Ask) => Decision::Allow,
-            _ => bash_decision,
-        }
-    } else if tool_name == "web_fetch" {
-        let url = tools::str_arg(args, "url");
-        let tool_decision = permissions.check_tool(mode, "web_fetch");
-        if tool_decision == Decision::Deny {
-            return Decision::Deny;
-        }
-        let pattern_decision = permissions.check_tool_pattern(mode, "web_fetch", &url);
-        match (&tool_decision, &pattern_decision) {
-            (_, Decision::Deny) => Decision::Deny,
-            (_, Decision::Allow) => Decision::Allow,
-            (Decision::Allow, Decision::Ask) => Decision::Ask,
-            _ => pattern_decision,
-        }
-    } else {
-        permissions.check_tool(mode, tool_name)
-    }
+    permissions.decide(mode, tool_name, args)
 }
 
 fn push_tool_result(

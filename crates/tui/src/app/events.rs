@@ -91,12 +91,16 @@ impl App {
                         vim,
                         auto_compact,
                         show_speed,
+                        restrict_to_workspace,
                     } => {
                         self.input.set_vim_enabled(vim);
                         state::set_vim_enabled(vim);
                         self.auto_compact = auto_compact;
                         self.show_speed = show_speed;
                         self.screen.set_show_speed(show_speed);
+                        self.restrict_to_workspace = restrict_to_workspace;
+                        self.permissions
+                            .set_restrict_to_workspace(restrict_to_workspace);
                     }
                     MenuResult::ModelSelect(key) => {
                         if let Some(resolved) = self.available_models.iter().find(|m| m.key == key)
@@ -324,6 +328,7 @@ impl App {
                     self.input.vim_enabled(),
                     self.auto_compact,
                     self.show_speed,
+                    self.restrict_to_workspace,
                 );
                 self.screen.mark_dirty();
                 EventOutcome::Redraw

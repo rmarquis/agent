@@ -70,6 +70,7 @@ pub struct SettingsConfig {
     pub vim_mode: Option<bool>,
     pub auto_compact: Option<bool>,
     pub show_speed: Option<bool>,
+    pub restrict_to_workspace: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]

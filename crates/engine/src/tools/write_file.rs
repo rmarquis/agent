@@ -1,4 +1,4 @@
-use super::{hash_content, str_arg, FileHashes, Tool, ToolResult};
+use super::{display_path, hash_content, str_arg, FileHashes, Tool, ToolResult};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
@@ -34,7 +34,7 @@ impl Tool for WriteFileTool {
     }
 
     fn needs_confirm(&self, args: &HashMap<String, Value>) -> Option<String> {
-        Some(str_arg(args, "file_path"))
+        Some(display_path(&str_arg(args, "file_path")))
     }
 
     fn execute(&self, args: &HashMap<String, Value>) -> ToolResult {
@@ -66,7 +66,7 @@ impl Tool for WriteFileTool {
                     map.insert(path.clone(), hash_content(&content));
                 }
                 ToolResult {
-                    content: format!("wrote {} bytes to {}", content.len(), path),
+                    content: format!("wrote {} bytes to {}", content.len(), display_path(&path)),
                     is_error: false,
                 }
             }

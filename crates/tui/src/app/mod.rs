@@ -45,6 +45,7 @@ pub struct App {
     pub context_window: Option<u32>,
     pub auto_compact: bool,
     pub show_speed: bool,
+    pub restrict_to_workspace: bool,
     pub available_models: Vec<crate::config::ResolvedModel>,
     pub engine: EngineHandle,
     pending_title: bool,
@@ -242,6 +243,7 @@ impl App {
         vim_from_config: bool,
         auto_compact: bool,
         show_speed: bool,
+        restrict_to_workspace: bool,
         reasoning_effort: protocol::ReasoningEffort,
         shared_session: Arc<Mutex<Option<Session>>>,
         available_models: Vec<crate::config::ResolvedModel>,
@@ -288,12 +290,20 @@ impl App {
             context_window: None,
             auto_compact,
             show_speed,
+            restrict_to_workspace,
             available_models,
             engine,
             pending_title: false,
             last_width: terminal::size().map(|(w, _)| w).unwrap_or(80),
             last_height: terminal::size().map(|(_, h)| h).unwrap_or(24),
-            permissions: Permissions::load(),
+            permissions: {
+                let mut p = Permissions::load();
+                p.set_restrict_to_workspace(restrict_to_workspace);
+                if let Ok(cwd) = std::env::current_dir() {
+                    p.set_workspace(cwd);
+                }
+                p
+            },
             next_turn_id: 1,
         }
     }
@@ -337,6 +347,7 @@ impl App {
                     self.input.vim_enabled(),
                     self.auto_compact,
                     self.show_speed,
+                    self.restrict_to_workspace,
                 );
                 self.screen.mark_dirty();
             } else if let Some(reason) = classify_startup_command(trimmed) {
@@ -465,25 +476,23 @@ impl App {
                 self.screen.set_pending_dialog(false);
             }
             if deferred_dialog.is_some() && active_dialog.is_none() && agent.is_some() {
-                // Auto-approve deferred confirms in Yolo mode.
-                if self.mode == Mode::Yolo {
-                    match deferred_dialog.take() {
-                        Some(DeferredDialog::Confirm { request_id, .. }) => {
-                            self.screen.set_pending_dialog(false);
-                            self.engine.send(UiCommand::PermissionDecision {
-                                request_id,
-                                approved: true,
-                                message: None,
-                            });
-                        }
-                        Some(DeferredDialog::AskQuestion { request_id, .. }) => {
-                            self.screen.set_pending_dialog(false);
-                            self.engine.send(UiCommand::QuestionAnswer {
-                                request_id,
-                                answer: None,
-                            });
-                        }
-                        None => {}
+                // Try to auto-approve deferred confirms using full permission check.
+                if let Some(DeferredDialog::Confirm {
+                    ref tool_name,
+                    ref args,
+                    request_id,
+                    ..
+                }) = deferred_dialog
+                {
+                    let decision = self.permissions.decide(self.mode, tool_name, args);
+                    if decision == engine::permissions::Decision::Allow {
+                        self.screen.set_pending_dialog(false);
+                        self.engine.send(UiCommand::PermissionDecision {
+                            request_id,
+                            approved: true,
+                            message: None,
+                        });
+                        deferred_dialog.take();
                     }
                 }
 
@@ -503,9 +512,8 @@ impl App {
                             summary,
                             request_id,
                         } => {
-                            // Re-check permissions with current mode.
-                            // If mode changed to one that allows this tool, auto-approve.
-                            let decision = self.permissions.check_tool(self.mode, &tool_name);
+                            // Re-check permissions with current mode (includes workspace).
+                            let decision = self.permissions.decide(self.mode, &tool_name, &args);
                             if decision == engine::permissions::Decision::Allow {
                                 self.engine.send(UiCommand::PermissionDecision {
                                     request_id,
@@ -513,8 +521,10 @@ impl App {
                                     message: None,
                                 });
                             } else {
-                                self.screen.commit_active_tool();
                                 self.screen.set_active_status(ToolStatus::Confirm);
+                                let height =
+                                    crossterm::terminal::size().map(|(_, h)| h).unwrap_or(24);
+                                self.screen.set_show_tool_in_dialog(height >= 14);
                                 active_dialog = Some(Box::new(ConfirmDialog::new(
                                     &tool_name,
                                     &desc,
@@ -526,7 +536,9 @@ impl App {
                             }
                         }
                         DeferredDialog::AskQuestion { args, request_id } => {
-                            self.screen.commit_active_tool();
+                            self.screen.set_active_status(ToolStatus::Confirm);
+                            let height = crossterm::terminal::size().map(|(_, h)| h).unwrap_or(24);
+                            self.screen.set_show_tool_in_dialog(height >= 14);
                             let questions = render::parse_questions(&args);
                             active_dialog =
                                 Some(Box::new(QuestionDialog::new(questions, request_id)));
@@ -566,25 +578,17 @@ impl App {
                         }
                     }
 
-                    // If we just switched to Yolo, auto-approve any deferred dialog.
-                    if self.mode == Mode::Yolo {
-                        match deferred_dialog.take() {
-                            Some(DeferredDialog::Confirm { request_id, .. }) => {
-                                self.screen.set_pending_dialog(false);
-                                self.engine.send(UiCommand::PermissionDecision {
-                                    request_id,
-                                    approved: true,
-                                    message: None,
-                                });
-                            }
-                            Some(DeferredDialog::AskQuestion { request_id, .. }) => {
-                                self.screen.set_pending_dialog(false);
-                                self.engine.send(UiCommand::QuestionAnswer {
-                                    request_id,
-                                    answer: None,
-                                });
-                            }
-                            None => {}
+                    // If mode changed, re-check deferred dialog with full permissions.
+                    if let Some(DeferredDialog::Confirm { ref tool_name, ref args, request_id, .. }) = deferred_dialog {
+                        let decision = self.permissions.decide(self.mode, tool_name, args);
+                        if decision == engine::permissions::Decision::Allow {
+                            self.screen.set_pending_dialog(false);
+                            self.engine.send(UiCommand::PermissionDecision {
+                                request_id,
+                                approved: true,
+                                message: None,
+                            });
+                            deferred_dialog.take();
                         }
                     }
 

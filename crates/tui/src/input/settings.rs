@@ -102,6 +102,7 @@ pub enum MenuKind {
         vim_enabled: bool,
         auto_compact: bool,
         show_speed: bool,
+        restrict_to_workspace: bool,
     },
     Model {
         /// (key, model_name, provider_name) for each entry.
@@ -129,6 +130,7 @@ pub enum MenuResult {
         vim: bool,
         auto_compact: bool,
         show_speed: bool,
+        restrict_to_workspace: bool,
     },
     ModelSelect(String),
     ThemeSelect(u8),
