@@ -2006,6 +2006,8 @@ impl App {
                     self.screen.finish_tool(status, output);
                 }
                 *pending = None;
+                self.screen
+                    .set_running_procs(self.engine.processes.running_count());
                 SessionControl::Continue
             }
             EngineEvent::RequestPermission {
@@ -2041,6 +2043,8 @@ impl App {
                     None => format!("Background process {id} exited."),
                 };
                 self.screen.push(Block::Text { content: msg });
+                self.screen
+                    .set_running_procs(self.engine.processes.running_count());
                 SessionControl::Continue
             }
             EngineEvent::CompactionComplete { messages } => {
@@ -2101,6 +2105,8 @@ impl App {
                     None => format!("Background process {id} exited."),
                 };
                 self.screen.push(Block::Text { content: msg });
+                self.screen
+                    .set_running_procs(self.engine.processes.running_count());
             }
             _ => {}
         }

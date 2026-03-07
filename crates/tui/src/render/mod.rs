@@ -1178,7 +1178,7 @@ impl Screen {
                 });
             }
             right_spans.push(BarSpan {
-                text: format!(" {} ", format_tokens(tokens)),
+                text: format!(" {}", format_tokens(tokens)),
                 color: theme::MUTED,
                 attr: None,
                 priority: 1,
@@ -1197,7 +1197,7 @@ impl Screen {
                 format!("{} procs", self.running_procs)
             };
             right_spans.push(BarSpan {
-                text: format!("{label} "),
+                text: label,
                 color: theme::accent(),
                 attr: None,
                 priority: 0,
@@ -1317,19 +1317,19 @@ impl Screen {
 
         let mode_spans: Vec<BarSpan> = match mode {
             protocol::Mode::Plan => vec![BarSpan {
-                text: " plan ".into(),
+                text: " plan".into(),
                 color: theme::PLAN,
                 attr: None,
                 priority: 0,
             }],
             protocol::Mode::Apply => vec![BarSpan {
-                text: " apply ".into(),
+                text: " apply".into(),
                 color: theme::APPLY,
                 attr: None,
                 priority: 0,
             }],
             protocol::Mode::Yolo => vec![BarSpan {
-                text: " yolo ".into(),
+                text: " yolo".into(),
                 color: theme::YOLO,
                 attr: None,
                 priority: 0,
@@ -1361,15 +1361,19 @@ impl Screen {
         let new_rows = total_rows as u16;
 
         if prev_rows > new_rows {
+            // The \r\n here escapes any "pending wrap" state on the bar line,
+            // so Clear operations below won't erase the last bar character.
             let n = prev_rows - new_rows;
             for _ in 0..n {
                 let _ = out.queue(Print("\r\n"));
                 let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
             }
+            // Clear anything remaining below.
+            let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
+        } else if comp_rows > 0 {
+            // Completions already moved past the bar; safe to clear below.
+            let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
         }
-        // Clear anything remaining below — catches edge cases where the previous
-        // frame was taller due to pre-prompt section changes (active tool, blocks).
-        let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
 
         let rows_below: u16 = prev_rows.saturating_sub(new_rows);
         let total_drawn = pre_prompt_rows + new_rows + rows_below;
@@ -1704,10 +1708,10 @@ pub(super) fn draw_bar(
                     .map(|s| s.text.chars().count())
                     .sum();
                 if inner > 0 {
-                    inner + 1
+                    inner + 2
                 } else {
                     0
-                } // spans + trailing dash
+                } // spans + space + trailing dash
             })
             .unwrap_or(0);
         let total = left_chars + min_dashes + right_chars;
@@ -1741,7 +1745,7 @@ pub(super) fn draw_bar(
             .iter()
             .map(|s| s.text.chars().count())
             .sum::<usize>()
-            + 1
+            + 2
     };
     let bar_len = width.saturating_sub(left_len + right_len);
 
@@ -1774,6 +1778,7 @@ pub(super) fn draw_bar(
             let _ = out.queue(Print(&span.text));
             let _ = out.queue(ResetColor);
         }
+        let _ = out.queue(Print(" "));
         let _ = out.queue(SetForegroundColor(bar_color));
         let _ = out.queue(Print(dash));
         let _ = out.queue(ResetColor);
