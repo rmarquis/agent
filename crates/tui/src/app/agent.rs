@@ -290,6 +290,10 @@ impl App {
                 restore_vim_insert,
             } => {
                 if let Some(idx) = block_idx {
+                    if agent.is_some() {
+                        self.finish_turn(true);
+                        *agent = None;
+                    }
                     if let Some((text, images)) = self.rewind_to(idx) {
                         self.input.restore_from_rewind(text, images);
                     }
