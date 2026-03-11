@@ -1564,6 +1564,7 @@ fn wrap_and_locate_cursor(
     let mut cursor_col = 0;
     let mut chars_seen = 0usize;
     let mut cursor_set = false;
+    let max_col = usable.max(1);
 
     for text_line in buf.split('\n') {
         let chars: Vec<char> = text_line.chars().collect();
@@ -1575,21 +1576,73 @@ fn wrap_and_locate_cursor(
             }
             visual_lines.push((String::new(), Vec::new()));
         } else {
-            let chunks: Vec<_> = chars.chunks(usable.max(1)).collect();
+            // Build word-boundary chunks.
+            let mut chunks: Vec<&[char]> = Vec::new();
+            let mut line_start = 0;
+            let mut col = 0;
+
+            // Find word boundaries (split on spaces, keeping space with preceding word).
+            let mut i = 0;
+            while i < chars.len() {
+                // Find end of current word (including trailing spaces).
+                let word_start = i;
+                // Non-space characters.
+                while i < chars.len() && chars[i] != ' ' {
+                    i += 1;
+                }
+                // Trailing spaces.
+                while i < chars.len() && chars[i] == ' ' {
+                    i += 1;
+                }
+                let word_len = i - word_start;
+
+                if word_len > max_col {
+                    // Word is longer than the line — must hard-wrap it character by character.
+                    let mut wi = word_start;
+                    while wi < i {
+                        let take = (max_col - col).min(i - wi);
+                        if take == 0 {
+                            chunks.push(&chars[line_start..wi]);
+                            line_start = wi;
+                            col = 0;
+                            continue;
+                        }
+                        col += take;
+                        wi += take;
+                        if col >= max_col && wi < chars.len() {
+                            chunks.push(&chars[line_start..wi]);
+                            line_start = wi;
+                            col = 0;
+                        }
+                    }
+                } else if col + word_len > max_col && col > 0 {
+                    // Wrap before this word.
+                    chunks.push(&chars[line_start..word_start]);
+                    line_start = word_start;
+                    col = word_len;
+                } else {
+                    col += word_len;
+                }
+            }
+            // Remaining text on the last visual line.
+            if line_start <= chars.len() {
+                chunks.push(&chars[line_start..]);
+            }
+
             for (ci, chunk) in chunks.iter().enumerate() {
-                let line_start = chars_seen;
+                let chunk_start = chars_seen;
                 let is_last_chunk = ci == chunks.len() - 1;
                 if !cursor_set
-                    && cursor_char >= line_start
-                    && (cursor_char < line_start + chunk.len()
-                        || (is_last_chunk && cursor_char == line_start + chunk.len()))
+                    && cursor_char >= chunk_start
+                    && (cursor_char < chunk_start + chunk.len()
+                        || (is_last_chunk && cursor_char == chunk_start + chunk.len()))
                 {
                     cursor_line = visual_lines.len();
-                    cursor_col = cursor_char - line_start;
+                    cursor_col = cursor_char - chunk_start;
                     cursor_set = true;
                 }
                 let kinds = char_kinds
-                    .get(line_start..line_start + chunk.len())
+                    .get(chunk_start..chunk_start + chunk.len())
                     .unwrap_or_default()
                     .to_vec();
                 chars_seen += chunk.len();
