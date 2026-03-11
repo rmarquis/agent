@@ -1,7 +1,7 @@
 use super::{
-    begin_dialog_draw, finish_dialog_frame, render_inline_textarea, DialogResult, TextArea,
+    begin_dialog_draw, finish_dialog_frame, render_inline_textarea, wrap_line, DialogResult,
+    TextArea,
 };
-use crate::render::blocks::wrap_line;
 use crate::render::{crlf, draw_bar, RenderOut};
 use crate::theme;
 use crossterm::event::{KeyCode, KeyModifiers};

@@ -110,7 +110,10 @@ impl App {
                 let drain_n = count.min(self.queued_messages.len());
                 self.queued_messages.drain(..drain_n);
                 *steered_count = steered_count.saturating_sub(drain_n);
-                self.screen.push(Block::User { text });
+                // Only render if the message is still queued (not unqueued by Esc).
+                if drain_n > 0 {
+                    self.screen.push(Block::User { text });
+                }
                 SessionControl::Continue
             }
             EngineEvent::Thinking { content } => {

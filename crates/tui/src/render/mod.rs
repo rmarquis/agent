@@ -566,7 +566,12 @@ impl Screen {
 
     pub fn finish_tool(&mut self, status: ToolStatus, output: Option<ToolOutput>) {
         if let Some(tool) = self.active_tool.take() {
-            let elapsed = tool.elapsed();
+            // Don't show elapsed time for denied tools - they never actually ran.
+            let elapsed = if status == ToolStatus::Denied {
+                None
+            } else {
+                tool.elapsed()
+            };
             self.history.push(Block::ToolCall {
                 name: tool.name,
                 summary: tool.summary,
@@ -610,7 +615,7 @@ impl Screen {
         let mut rows = 1u16;
         if tool.name == "web_fetch" {
             if let Some(prompt) = tool.args.get("prompt").and_then(|v| v.as_str()) {
-                rows += blocks::wrap_line(prompt, w.saturating_sub(4)).len() as u16;
+                rows += wrap_line(prompt, w.saturating_sub(4)).len() as u16;
             }
         }
         gap + rows
@@ -706,7 +711,12 @@ impl Screen {
 
     pub fn commit_active_tool_as(&mut self, status: ToolStatus) {
         if let Some(tool) = self.active_tool.take() {
-            let elapsed = tool.elapsed();
+            // Don't show elapsed time for denied tools - they never actually ran.
+            let elapsed = if status == ToolStatus::Denied {
+                None
+            } else {
+                tool.elapsed()
+            };
             self.history.push(Block::ToolCall {
                 name: tool.name,
                 summary: tool.summary,
@@ -1433,7 +1443,7 @@ fn render_queued(out: &mut RenderOut, queued: &[String], usable: usize) -> u16 {
                 rows += 1;
                 continue;
             }
-            let chunks = chunk_line(line, text_w);
+            let chunks = wrap_line(line, text_w);
             for chunk in &chunks {
                 let chunk_len = chunk.chars().count();
                 let trailing = if block_w > 0 {
@@ -1473,16 +1483,43 @@ pub(super) fn truncate_str(s: &str, max: usize) -> String {
     truncated
 }
 
-/// Split a string into fixed-width segments by character count.
-pub(super) fn chunk_line(line: &str, width: usize) -> Vec<String> {
-    let chars: Vec<char> = line.chars().collect();
-    if chars.is_empty() {
-        return vec![String::new()];
-    }
+/// Wrap a line to fit within `width` display columns, breaking at word boundaries.
+/// Words longer than `width` are broken character-by-character.
+pub(super) fn wrap_line(line: &str, width: usize) -> Vec<String> {
     if width == 0 {
         return vec![line.to_string()];
     }
-    chars.chunks(width).map(|c| c.iter().collect()).collect()
+    let mut chunks: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut col = 0;
+
+    for word in line.split_inclusive(' ') {
+        let wlen = word.chars().count();
+        if col + wlen > width && col > 0 {
+            chunks.push(current);
+            current = String::new();
+            col = 0;
+        }
+        if wlen > width {
+            // Word is longer than the line — hard-wrap it character by character.
+            for ch in word.chars() {
+                if col >= width {
+                    chunks.push(current);
+                    current = String::new();
+                    col = 0;
+                }
+                current.push(ch);
+                col += 1;
+            }
+        } else {
+            current.push_str(word);
+            col += wlen;
+        }
+    }
+    if !current.is_empty() || chunks.is_empty() {
+        chunks.push(current);
+    }
+    chunks
 }
 
 fn make_relative(path: &str) -> String {

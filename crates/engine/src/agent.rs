@@ -414,6 +414,15 @@ impl<'a> Turn<'a> {
                         tool_call_id: None,
                     });
                 }
+                Ok(UiCommand::Unsteer { count }) => {
+                    // Remove the last `count` steered user messages.
+                    for _ in 0..count {
+                        if let Some(pos) = self.messages.iter().rposition(|m| m.role == Role::User)
+                        {
+                            self.messages.remove(pos);
+                        }
+                    }
+                }
                 Ok(UiCommand::SetMode { mode }) => {
                     self.mode = mode;
                 }

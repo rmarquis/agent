@@ -418,6 +418,10 @@ impl App {
             if !self.input.buf.is_empty() {
                 t.last_ctrlc = Some(Instant::now());
                 self.input.clear();
+                let count = self.queued_messages.len();
+                if count > 0 {
+                    self.engine.send(UiCommand::Unsteer { count });
+                }
                 self.queued_messages.clear();
                 self.screen.mark_dirty();
                 return EventOutcome::Noop;
@@ -447,6 +451,11 @@ impl App {
                     self.screen.mark_dirty();
                 }
                 EscAction::Unqueue => {
+                    // Tell the engine to remove already-steered messages.
+                    let count = self.queued_messages.len();
+                    if count > 0 {
+                        self.engine.send(UiCommand::Unsteer { count });
+                    }
                     let mut combined = self.queued_messages.join("\n");
                     if !self.input.buf.is_empty() {
                         combined.push('\n');

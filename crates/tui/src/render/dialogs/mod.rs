@@ -16,7 +16,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use crossterm::{cursor, style::Print, terminal, QueueableCommand};
 use std::io::Write;
 
-use super::{chunk_line, crlf, ConfirmChoice, RenderOut};
+use super::{crlf, wrap_line, ConfirmChoice, RenderOut};
 
 pub enum DialogResult {
     Dismissed,
@@ -222,7 +222,7 @@ impl TextArea {
     pub fn visual_row_count(&self, wrap_w: usize) -> u16 {
         self.lines
             .iter()
-            .map(|l| chunk_line(l, wrap_w).len() as u16)
+            .map(|l| wrap_line(l, wrap_w).len() as u16)
             .sum()
     }
 
@@ -232,7 +232,7 @@ impl TextArea {
 
         for (li, line) in self.lines.iter().enumerate() {
             let vis_start = visual.len();
-            let chunks = chunk_line(line, wrap_w);
+            let chunks = wrap_line(line, wrap_w);
             visual.extend(chunks);
 
             if li == self.row {

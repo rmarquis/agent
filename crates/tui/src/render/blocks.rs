@@ -13,7 +13,7 @@ use super::highlight::{
     print_inline_diff, print_syntax_file, render_code_block, render_markdown_table,
 };
 use super::{
-    chunk_line, crlf, truncate_str, Block, ConfirmChoice, RenderOut, ToolOutput, ToolStatus,
+    crlf, truncate_str, wrap_line, Block, ConfirmChoice, RenderOut, ToolOutput, ToolStatus,
 };
 
 /// Element types for spacing calculation.
@@ -25,6 +25,18 @@ pub(super) enum Element<'a> {
 
 /// Number of blank lines to insert between two adjacent elements.
 pub(super) fn gap_between(above: &Element, below: &Element) -> u16 {
+    // Code block borders already provide visual separation, so skip gaps
+    // when a Text block leads or trails with a code fence.
+    if let Element::Block(Block::Text { content }) = below {
+        if content.trim_start().starts_with("```") {
+            return 0;
+        }
+    }
+    if let Element::Block(Block::Text { content }) = above {
+        if content.trim_end().ends_with("```") {
+            return 0;
+        }
+    }
     match (above, below) {
         (Element::Block(Block::User { .. }), _) => 1,
         (_, Element::Block(Block::User { .. })) => 1,
@@ -94,7 +106,7 @@ pub(super) fn render_block(out: &mut RenderOut, block: &Block, width: usize) -> 
                     rows += 1;
                     continue;
                 }
-                let chunks = chunk_line(logical_line, text_w);
+                let chunks = wrap_line(logical_line, text_w);
                 for chunk in &chunks {
                     let chunk_len = chunk.chars().count();
                     let trailing = if block_w > 0 {
@@ -476,7 +488,6 @@ fn render_markdown(
     let lines: Vec<&str> = content.lines().collect();
     let mut i = 0;
     let mut rows = 0u16;
-    let mut prev_blank = true; // treat start as if preceded by blank
     while i < lines.len() {
         if lines[i].trim_start().starts_with("```") {
             let lang = lines[i].trim_start().trim_start_matches('`').trim();
@@ -489,32 +500,36 @@ fn render_markdown(
             if i < lines.len() {
                 i += 1;
             }
-            if !prev_blank {
-                crlf(out);
-                rows += 1;
-            }
             rows += render_code_block(out, code_lines, lang, width, dim);
-            // Insert blank after code block unless next line is already blank
-            if i < lines.len() && !lines[i].trim().is_empty() {
-                crlf(out);
-                rows += 1;
+            // Skip blank lines after code block — the border provides spacing.
+            while i < lines.len() && lines[i].trim().is_empty() {
+                i += 1;
             }
-            prev_blank = true;
         } else if lines[i].trim_start().starts_with('|') {
             let table_start = i;
             while i < lines.len() && lines[i].trim_start().starts_with('|') {
                 i += 1;
             }
             rows += render_markdown_table(out, &lines[table_start..i], dim);
-            prev_blank = false;
         } else {
+            // Skip blank lines before a code fence — the border provides spacing.
+            let is_blank = lines[i].trim().is_empty();
+            if is_blank {
+                let mut j = i + 1;
+                while j < lines.len() && lines[j].trim().is_empty() {
+                    j += 1;
+                }
+                if j < lines.len() && lines[j].trim_start().starts_with("```") {
+                    i = j;
+                    continue;
+                }
+            }
             let segments = wrap_line(lines[i], max_cols);
             for seg in &segments {
                 let _ = out.queue(Print(indent));
                 print_styled_dim(out, seg, dim);
                 crlf(out);
             }
-            prev_blank = lines[i].trim().is_empty();
             i += 1;
             rows += segments.len() as u16;
         }
@@ -601,45 +616,6 @@ fn result_preview(content: &str, max_lines: usize) -> String {
             lines.len()
         )
     }
-}
-
-/// Wrap a line to fit within `max_cols` display columns, breaking at word boundaries.
-pub(super) fn wrap_line(line: &str, max_cols: usize) -> Vec<String> {
-    if max_cols == 0 {
-        return vec![line.to_string()];
-    }
-    let mut segments: Vec<String> = Vec::new();
-
-    for physical_line in line.split('\n') {
-        let physical_line = physical_line.trim_end_matches('\r');
-        let mut current = String::new();
-        let mut col = 0;
-
-        for word in physical_line.split_inclusive(' ') {
-            let wlen = word.chars().count();
-            if col + wlen > max_cols && col > 0 {
-                segments.push(current);
-                current = String::new();
-                col = 0;
-            }
-            if wlen > max_cols {
-                for ch in word.chars() {
-                    if col >= max_cols {
-                        segments.push(current);
-                        current = String::new();
-                        col = 0;
-                    }
-                    current.push(ch);
-                    col += 1;
-                }
-            } else {
-                current.push_str(word);
-                col += wlen;
-            }
-        }
-        segments.push(current);
-    }
-    segments
 }
 
 pub(crate) fn print_styled_dim(out: &mut RenderOut, text: &str, dim: bool) {
@@ -894,7 +870,10 @@ mod tests {
     fn text_then_tool_split() {
         let blocks = vec![user("hello"), text("I'll check that.")];
         let (_, tg, _) = render_split(&blocks);
-        assert_eq!(tg, 1, "exactly 1 gap row between Text and ActiveTool (split)");
+        assert_eq!(
+            tg, 1,
+            "exactly 1 gap row between Text and ActiveTool (split)"
+        );
     }
 
     #[test]
@@ -1004,10 +983,7 @@ mod tests {
         let rows = block_rows(&text(""));
         assert_eq!(rows, 0, "empty text renders 0 rows");
 
-        let gap = gap_between(
-            &Element::Block(&text("")),
-            &Element::ActiveTool,
-        );
+        let gap = gap_between(&Element::Block(&text("")), &Element::ActiveTool);
         assert_eq!(gap, 1, "gap is still 1 for empty text block");
 
         // This means: User(1 row) + gap(1) + Text(0 rows) + gap(1) = tool at offset 3
@@ -1021,18 +997,13 @@ mod tests {
         let blocks_no_empty = vec![user("hello")];
         let c = render_all_at_once(&blocks_no_empty);
         // User→ActiveTool gap:
-        let gap_user_tool = gap_between(
-            &Element::Block(&user("hello")),
-            &Element::ActiveTool,
-        );
+        let gap_user_tool = gap_between(&Element::Block(&user("hello")), &Element::ActiveTool);
         assert_eq!(gap_user_tool, 1, "User→ActiveTool = 1");
 
         // With empty text:  total = user_rows + 1(User→Text gap=0, Text→Text=0? no, User→Text)
         // Let me compute manually:
-        let user_text_gap = gap_between(
-            &Element::Block(&user("hello")),
-            &Element::Block(&text("")),
-        );
+        let user_text_gap =
+            gap_between(&Element::Block(&user("hello")), &Element::Block(&text("")));
         // User→anything = 1
         assert_eq!(user_text_gap, 1, "User→Text = 1");
         // text("")→ActiveTool = 1
@@ -1042,19 +1013,13 @@ mod tests {
 
         let diff = a.2 as i32 - c.2 as i32;
         // diff should be 1 if there's an extra gap from the empty text
-        assert_eq!(
-            diff, 1,
-            "empty text block adds 1 extra gap row (the bug!)"
-        );
+        assert_eq!(diff, 1, "empty text block adds 1 extra gap row (the bug!)");
     }
 
     #[test]
     fn adjacent_text_blocks_gap() {
         // Two consecutive text blocks — gap should be 0 (Text→Text = _ => 0).
-        let gap = gap_between(
-            &Element::Block(&text("a")),
-            &Element::Block(&text("b")),
-        );
+        let gap = gap_between(&Element::Block(&text("a")), &Element::Block(&text("b")));
         assert_eq!(gap, 0, "Text→Text gap = 0");
     }
 
@@ -1075,10 +1040,7 @@ mod tests {
             let mut out = RenderOut::buffer();
             for i in flushed..end {
                 let gap = if i > 0 {
-                    gap_between(
-                        &Element::Block(&blocks[i - 1]),
-                        &Element::Block(&blocks[i]),
-                    )
+                    gap_between(&Element::Block(&blocks[i - 1]), &Element::Block(&blocks[i]))
                 } else {
                     0
                 };

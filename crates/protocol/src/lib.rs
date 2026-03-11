@@ -277,6 +277,9 @@ pub enum UiCommand {
     /// Inject a message mid-turn (steering / type-ahead).
     Steer { text: String },
 
+    /// Remove the last `count` steered messages (user unqueued them).
+    Unsteer { count: usize },
+
     /// Reply to a `RequestPermission` event.
     PermissionDecision {
         request_id: u64,

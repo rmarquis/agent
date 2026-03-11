@@ -209,11 +209,15 @@ impl Provider {
                     },
                 };
 
-                log::entry(log::Level::Warn, "request_error", &serde_json::json!({
-                    "attempt": attempt,
-                    "status": code,
-                    "error": err.to_string(),
-                }));
+                log::entry(
+                    log::Level::Warn,
+                    "request_error",
+                    &serde_json::json!({
+                        "attempt": attempt,
+                        "status": code,
+                        "error": err.to_string(),
+                    }),
+                );
 
                 if err.is_retryable() && attempt < max_retries {
                     let delay = Duration::from_millis(500 * 2u64.pow(attempt as u32));
