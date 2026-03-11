@@ -44,19 +44,22 @@ async fn main() {
     let app_state = tui::state::State::load();
     let available_models = cfg.resolve_models();
 
-    // Resolve the active model: CLI flags > cached selection > defaults.model > first in config
+    // Resolve the active model: CLI flags > defaults.model (if set) > last_used (if no default) > first in config
     let (api_base, api_key, api_key_env, model, model_config) = {
         let resolved = if let Some(ref cli_model) = args.model {
             available_models
                 .iter()
                 .find(|m| m.model_name == *cli_model || m.key == *cli_model)
-        } else if let Some(ref cached) = app_state.selected_model {
-            available_models.iter().find(|m| m.key == *cached)
         } else if let Some(default) = cfg.get_default_model() {
+            // Config has a default: use it, ignore cached selection
             available_models
                 .iter()
                 .find(|m| m.key == default || m.model_name == default)
+        } else if let Some(ref cached) = app_state.selected_model {
+            // No config default: use last used model
+            available_models.iter().find(|m| m.key == *cached)
         } else {
+            // Fallback to first model in config
             available_models.first()
         };
 
@@ -119,7 +122,7 @@ async fn main() {
     let show_speed = cfg.settings.show_speed.unwrap_or(true);
     let restrict_to_workspace = cfg.settings.restrict_to_workspace.unwrap_or(true);
 
-    // Parse reasoning effort from defaults
+    // Parse reasoning effort: defaults.reasoning_effort if set, otherwise use saved state
     let reasoning_effort = cfg
         .defaults
         .reasoning_effort
@@ -130,7 +133,7 @@ async fn main() {
             "high" => ReasoningEffort::High,
             _ => ReasoningEffort::Off,
         })
-        .unwrap_or(ReasoningEffort::Off);
+        .unwrap_or(app_state.reasoning_effort);
 
     // Parse theme accent from config
     if let Some(ref accent) = cfg.theme.accent {

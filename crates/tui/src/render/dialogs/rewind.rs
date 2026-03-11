@@ -74,7 +74,9 @@ impl super::Dialog for RewindDialog {
     }
 
     fn draw(&mut self, start_row: u16, sync_started: bool) {
-        let Some((mut out, w, _)) = self.list.begin_draw(start_row, self.turns.len(), sync_started)
+        let Some((mut out, w, _)) = self
+            .list
+            .begin_draw(start_row, self.turns.len(), sync_started)
         else {
             return;
         };

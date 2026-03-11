@@ -348,5 +348,4 @@ impl App {
             text: input.to_string(),
         });
     }
-
 }

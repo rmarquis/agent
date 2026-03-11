@@ -58,8 +58,11 @@ providers:
       - claude-sonnet-4-20250514
 
 # Startup defaults
+# These only apply on fresh startup when no explicit model is selected.
+# If defaults.model is set, it takes priority and overrides any cached selection.
+# If defaults.model is NOT set, the last used model from the previous session is used.
 defaults:
-  model: ollama/glm-5                      # provider_name/model_name (first model if omitted)
+  model: ollama/glm-5                      # provider_name/model_name
   reasoning_effort: "off"                  # "off" | "low" | "medium" | "high"
 
 # Runtime settings (all toggleable via /settings)

@@ -83,10 +83,11 @@ impl io::Write for RenderOut {
 pub(super) fn crlf(out: &mut RenderOut) {
     if out.row.is_some() {
         let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
-        let r = out.row.as_mut().unwrap();
-        *r += 1;
-        let next = *r;
-        let _ = out.queue(cursor::MoveTo(0, next));
+        if let Some(r) = &mut out.row {
+            *r += 1;
+            let next = *r;
+            let _ = out.queue(cursor::MoveTo(0, next));
+        }
     } else {
         let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
         let caller = std::panic::Location::caller();
@@ -655,7 +656,6 @@ impl Screen {
         self.commit_active_tool();
         self.render_pending_blocks();
     }
-
 
     /// Render unflushed blocks and scroll all viewport content into
     /// scrollback so the dialog gets a clean viewport.
