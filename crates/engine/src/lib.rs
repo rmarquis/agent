@@ -8,6 +8,7 @@ pub mod tools;
 
 use protocol::{EngineEvent, UiCommand};
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 pub use config::ModelConfig;
@@ -50,7 +51,7 @@ pub struct EngineConfig {
     pub model_config: ModelConfig,
     pub system_prompt: String,
     pub cwd: PathBuf,
-    pub permissions: Permissions,
+    pub permissions: Arc<Permissions>,
 }
 
 /// Handle to a running engine. Send commands, receive events.
@@ -58,6 +59,7 @@ pub struct EngineHandle {
     pub cmd_tx: mpsc::UnboundedSender<UiCommand>,
     pub event_rx: mpsc::UnboundedReceiver<EngineEvent>,
     pub processes: tools::ProcessRegistry,
+    pub permissions: Arc<Permissions>,
 }
 
 impl EngineHandle {
@@ -82,6 +84,7 @@ pub fn start(config: EngineConfig) -> EngineHandle {
     let processes = tools::ProcessRegistry::new();
     let registry = tools::build_tools(processes.clone());
 
+    let permissions = Arc::clone(&config.permissions);
     let processes_clone = processes.clone();
     tokio::spawn(agent::engine_task(
         config,
@@ -95,5 +98,6 @@ pub fn start(config: EngineConfig) -> EngineHandle {
         cmd_tx,
         event_rx,
         processes,
+        permissions,
     }
 }

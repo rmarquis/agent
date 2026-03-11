@@ -209,6 +209,7 @@ async fn main() {
     let mut permissions = engine::Permissions::load();
     permissions.set_workspace(cwd.clone());
     permissions.set_restrict_to_workspace(restrict_to_workspace);
+    let permissions = Arc::new(permissions);
     let initial_api_base = api_base.clone();
     let engine_handle = engine::start(engine::EngineConfig {
         api_base,
@@ -223,7 +224,7 @@ async fn main() {
         },
         system_prompt,
         cwd,
-        permissions,
+        permissions: permissions.clone(),
     });
 
     // Fetch context window in background (before moving available_models)
@@ -253,6 +254,7 @@ async fn main() {
         model,
         initial_api_base,
         api_key_env,
+        Arc::clone(&permissions),
         engine_handle,
         vim_enabled,
         auto_compact,

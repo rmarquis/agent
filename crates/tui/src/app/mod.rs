@@ -10,7 +10,7 @@ use crate::render::{
 };
 use crate::session::Session;
 use crate::{render, session, state, vim};
-use engine::EngineHandle;
+use engine::{permissions::Decision, EngineHandle, Permissions};
 use protocol::{Content, EngineEvent, Message, Mode, ReasoningEffort, Role, UiCommand};
 
 use crossterm::{
@@ -48,6 +48,10 @@ pub struct App {
     pub restrict_to_workspace: bool,
     pub available_models: Vec<crate::config::ResolvedModel>,
     pub engine: EngineHandle,
+    permissions: Arc<Permissions>,
+    /// Context for the currently-open confirm dialog, used to re-check
+    /// permissions when the user toggles mode.
+    confirm_context: Option<ConfirmContext>,
     pending_title: bool,
     last_width: u16,
     last_height: u16,
@@ -56,6 +60,12 @@ pub struct App {
     compact_epoch: u64,
     /// The `compact_epoch` value when the last compaction was requested.
     pending_compact_epoch: u64,
+}
+
+struct ConfirmContext {
+    tool_name: String,
+    args: HashMap<String, serde_json::Value>,
+    request_id: u64,
 }
 
 struct TurnState {
@@ -242,6 +252,7 @@ impl App {
         model: String,
         api_base: String,
         api_key_env: String,
+        permissions: Arc<Permissions>,
         engine: EngineHandle,
         vim_from_config: bool,
         auto_compact: bool,
@@ -296,6 +307,8 @@ impl App {
             restrict_to_workspace,
             available_models,
             engine,
+            permissions,
+            confirm_context: None,
             pending_title: false,
             last_width: terminal::size().map(|(w, _)| w).unwrap_or(80),
             last_height: terminal::size().map(|(_, h)| h).unwrap_or(24),
@@ -489,6 +502,11 @@ impl App {
                             summary,
                             request_id,
                         } => {
+                            self.confirm_context = Some(ConfirmContext {
+                                tool_name: tool_name.clone(),
+                                args: args.clone(),
+                                request_id,
+                            });
                             self.screen.set_active_status(ToolStatus::Confirm);
                             let dialog = Box::new(ConfirmDialog::new(
                                 &tool_name,

@@ -289,6 +289,7 @@ impl App {
                 tool_name,
                 request_id,
             } => {
+                self.confirm_context = None;
                 let should_cancel =
                     self.resolve_confirm((choice, message), request_id, &tool_name, agent);
                 self.screen.clear_dialog_area(anchor);
@@ -535,6 +536,11 @@ impl App {
                 if let Some(prev) = active_dialog.take() {
                     self.screen.clear_dialog_area(prev.anchor_row());
                 }
+                self.confirm_context = Some(ConfirmContext {
+                    tool_name: tool_name.clone(),
+                    args: args.clone(),
+                    request_id,
+                });
                 self.screen.set_active_status(ToolStatus::Confirm);
                 let dialog = Box::new(ConfirmDialog::new(
                     &tool_name,

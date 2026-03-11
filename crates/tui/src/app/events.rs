@@ -26,6 +26,37 @@ impl App {
                 active_dialog.as_mut().unwrap().handle_resize();
                 return false;
             }
+            // BackTab (shift-tab): toggle mode. If the new mode auto-allows
+            // the pending tool call, accept the dialog automatically.
+            if matches!(
+                ev,
+                Event::Key(KeyEvent {
+                    code: KeyCode::BackTab,
+                    ..
+                })
+            ) {
+                self.toggle_mode();
+                if let Some(ctx) = self.confirm_context.take() {
+                    if self
+                        .permissions
+                        .decide(self.mode, &ctx.tool_name, &ctx.args)
+                        == Decision::Allow
+                    {
+                        let d = active_dialog.take().unwrap();
+                        self.screen.clear_dialog_area(d.anchor_row());
+                        self.screen.set_active_status(ToolStatus::Pending);
+                        self.engine.send(UiCommand::PermissionDecision {
+                            request_id: ctx.request_id,
+                            approved: true,
+                            message: None,
+                        });
+                    } else {
+                        // Mode changed but still needs confirmation — keep dialog open.
+                        self.confirm_context = Some(ctx);
+                    }
+                }
+                return false;
+            }
             if let Event::Key(KeyEvent {
                 code, modifiers, ..
             }) = ev
