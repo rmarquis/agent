@@ -43,7 +43,7 @@ pub struct FramePrompt<'a> {
 /// * `row: Some(r)` — **overlay mode** (dialogs): `MoveTo(0, r+1)` repositions
 ///   the cursor without scrolling, so dialogs never pollute scrollback.
 pub(super) struct RenderOut {
-    pub out: io::Stdout,
+    pub out: Box<dyn Write>,
     pub row: Option<u16>,
 }
 
@@ -52,7 +52,16 @@ impl RenderOut {
     /// Dialogs switch to overlay mode by setting `out.row = Some(r)`.
     pub fn scroll() -> Self {
         Self {
-            out: io::stdout(),
+            out: Box::new(io::stdout()),
+            row: None,
+        }
+    }
+
+    /// Create a render output that writes to an in-memory buffer.
+    #[cfg(test)]
+    pub fn buffer() -> Self {
+        Self {
+            out: Box::new(Vec::<u8>::new()),
             row: None,
         }
     }

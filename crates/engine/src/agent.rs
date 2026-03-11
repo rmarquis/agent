@@ -240,7 +240,7 @@ impl<'a> Turn<'a> {
             }
 
             if let Some(ref reasoning) = resp.reasoning_content {
-                if !reasoning.is_empty() {
+                if !reasoning.trim().is_empty() {
                     self.emit(EngineEvent::Thinking {
                         content: reasoning.clone(),
                     });
@@ -248,7 +248,7 @@ impl<'a> Turn<'a> {
             }
 
             if let Some(ref content) = resp.content {
-                if !content.is_empty() {
+                if !content.trim().is_empty() {
                     self.emit(EngineEvent::Text {
                         content: content.clone(),
                     });

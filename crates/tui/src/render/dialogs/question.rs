@@ -42,8 +42,13 @@ pub fn parse_questions(args: &HashMap<String, serde_json::Value>) -> Vec<Questio
                 .as_array()?
                 .iter()
                 .filter_map(|o| {
+                    let label = o.get("label")?.as_str()?.to_string();
+                    // Strip "Other" option if LLM incorrectly included it
+                    if label.eq_ignore_ascii_case("other") {
+                        return None;
+                    }
                     Some(QuestionOption {
-                        label: o.get("label")?.as_str()?.to_string(),
+                        label,
                         description: o.get("description")?.as_str()?.to_string(),
                     })
                 })
@@ -204,6 +209,18 @@ impl super::Dialog for QuestionDialog {
             match (code, modifiers) {
                 (KeyCode::Esc, _) => {
                     self.editing_other[self.active_tab] = false;
+                }
+                (KeyCode::Enter, _) => {
+                    self.editing_other[self.active_tab] = false;
+                    self.answered[self.active_tab] = true;
+                    if let Some(next) = (0..self.questions.len()).find(|&i| !self.answered[i]) {
+                        self.active_tab = next;
+                    } else {
+                        return Some(DialogResult::Question {
+                            answer: Some(self.build_answer()),
+                            request_id: self.request_id,
+                        });
+                    }
                 }
                 (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
                     if self.other_areas[self.active_tab].is_empty() {
@@ -378,9 +395,6 @@ impl super::Dialog for QuestionDialog {
         let is_multi = q.multi_select;
         let other_idx = q.options.len();
 
-        crlf(&mut out);
-        row += 1;
-
         let suffix = if is_multi { " (space to toggle)" } else { "" };
         let q_max = w.saturating_sub(1 + suffix.len());
         let segments = wrap_line(&q.question, q_max);
@@ -503,7 +517,7 @@ impl super::Dialog for QuestionDialog {
         crlf(&mut out);
         let _ = out.queue(SetAttribute(Attribute::Dim));
         if editing {
-            let _ = out.queue(Print(" esc: done  enter: newline"));
+            let _ = out.queue(Print(" esc: cancel  enter: confirm"));
         } else if self.has_tabs {
             let _ = out.queue(Print(" tab: next question  enter: confirm"));
         } else {

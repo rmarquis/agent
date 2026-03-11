@@ -134,6 +134,14 @@ pub fn tool_arg_summary(tool_name: &str, args: &HashMap<String, Value>) -> Strin
         "web_fetch" => str_arg(args, "url"),
         "web_search" => str_arg(args, "query"),
         "read_process_output" | "stop_process" => str_arg(args, "id"),
+        "ask_user_question" => args
+            .get("questions")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|q| q.get("question"))
+            .and_then(|q| q.as_str())
+            .unwrap_or("")
+            .to_string(),
         _ => String::new(),
     }
 }
