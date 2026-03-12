@@ -216,7 +216,7 @@ fn compute_diff_view(old: &str, new: &str, path: &str, anchor: &str) -> DiffView
     } else {
         file_content
             .find(lookup)
-            .map(|pos| file_content[..pos].lines().count())
+            .map(|pos| file_content[..pos].bytes().filter(|&b| b == b'\n').count())
             .unwrap_or(0)
     };
 
@@ -332,6 +332,24 @@ pub(super) fn print_inline_diff(
     let file_lines: Vec<&str> = expanded_lines.iter().map(|s| s.as_str()).collect();
     let changes = &dv.changes;
 
+    // Compute the leading whitespace the old/new strings are missing compared
+    // to the actual file indentation so we can re-add it to diff lines.
+    let lookup = if !anchor.is_empty() { anchor } else { old };
+    let lookup_indent = lookup
+        .lines()
+        .next()
+        .unwrap_or("")
+        .chars()
+        .take_while(|c| c.is_whitespace())
+        .count();
+    let file_indent = file_lines
+        .get(dv.start_line)
+        .unwrap_or(&"")
+        .chars()
+        .take_while(|c| c.is_whitespace())
+        .count();
+    let extra_indent = " ".repeat(file_indent.saturating_sub(lookup_indent));
+
     let max_lineno = dv.max_display_lineno;
     let gutter_width = format!("{}", max_lineno).len();
     let prefix_len = indent.len() + 1 + gutter_width + 3;
@@ -404,7 +422,11 @@ pub(super) fn print_inline_diff(
         if emitted >= emit_limit {
             break;
         }
-        let raw = change.value.trim_end_matches('\n').replace('\t', "    ");
+        let raw = format!(
+            "{}{}",
+            extra_indent,
+            change.value.trim_end_matches('\n').replace('\t', "    ")
+        );
         let text = raw.as_str();
         match change.tag {
             ChangeTag::Equal => {
@@ -556,6 +578,22 @@ pub(super) fn count_inline_diff_rows(old: &str, new: &str, path: &str, anchor: &
         .collect();
     let file_lines: Vec<&str> = expanded_lines.iter().map(|s| s.as_str()).collect();
 
+    let lookup = if !anchor.is_empty() { anchor } else { old };
+    let lookup_indent = lookup
+        .lines()
+        .next()
+        .unwrap_or("")
+        .chars()
+        .take_while(|c| c.is_whitespace())
+        .count();
+    let file_indent_n = file_lines
+        .get(dv.start_line)
+        .unwrap_or(&"")
+        .chars()
+        .take_while(|c| c.is_whitespace())
+        .count();
+    let extra_indent_n = file_indent_n.saturating_sub(lookup_indent);
+
     let visual_rows_for = |line: &str| -> usize {
         let chars = line.replace('\t', "    ").chars().count();
         if max_content == 0 {
@@ -581,7 +619,12 @@ pub(super) fn count_inline_diff_rows(old: &str, new: &str, path: &str, anchor: &
     let mut pending_ellipsis = false;
     let mut emitted_any = rows > 0;
     for (ci, change) in dv.changes.iter().enumerate() {
-        let line = change.value.trim_end_matches('\n');
+        let padded = format!(
+            "{}{}",
+            " ".repeat(extra_indent_n),
+            change.value.trim_end_matches('\n')
+        );
+        let line = padded.as_str();
         match change.tag {
             ChangeTag::Equal => {
                 if visible[ci] {
