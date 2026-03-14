@@ -62,11 +62,14 @@ jobs:
             rm -f "${file}.bak"
           done
 
+      - name: Update lockfile
+        run: cargo generate-lockfile
+
       - name: Commit and push version update
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml crates/protocol/Cargo.toml crates/engine/Cargo.toml crates/tui/Cargo.toml
+          git add Cargo.toml Cargo.lock crates/protocol/Cargo.toml crates/engine/Cargo.toml crates/tui/Cargo.toml
           if git diff --staged --quiet; then
             echo "Version already up to date"
           else
