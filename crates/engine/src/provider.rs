@@ -164,6 +164,11 @@ impl Provider {
                     "reasoning_effort": effort,
                 }),
             );
+        } else {
+            body.insert(
+                "chat_template_kwargs",
+                serde_json::json!({ "enable_thinking": false }),
+            );
         }
 
         log::entry(
