@@ -698,9 +698,10 @@ impl App {
                     }
                 }
                 EngineEvent::RequestPermission { request_id, .. } => {
+                    let approved = self.mode == Mode::Yolo;
                     self.engine.send(UiCommand::PermissionDecision {
                         request_id,
-                        approved: false,
+                        approved,
                         message: None,
                     });
                 }
