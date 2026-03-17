@@ -470,6 +470,7 @@ pub(super) fn print_inline_diff(
                 if !visible[ci] {
                     let _ = h_new.highlight_line(&format!("{}\n", text), &SYNTAX_SET);
                 }
+                old_lineno += 1;
                 new_lineno += 1;
             }
             ChangeTag::Delete => {
