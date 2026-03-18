@@ -82,13 +82,25 @@ impl ConfirmPreview {
         }
     }
 
-    fn total_rows(&self) -> u16 {
+    fn total_rows(&self, width: usize) -> u16 {
         match self {
             ConfirmPreview::None => 0,
             ConfirmPreview::Diff { old, new, path } => count_inline_diff_rows(old, new, path, old),
             ConfirmPreview::FileContent { content, .. } => content.lines().count() as u16,
             ConfirmPreview::BashBody { full_command } => (full_command.lines().count() - 1) as u16,
-            ConfirmPreview::PlanContent { summary } => summary.lines().count() as u16,
+            ConfirmPreview::PlanContent { summary } => {
+                let wrap_w = width.saturating_sub(1);
+                summary
+                    .lines()
+                    .map(|line| {
+                        if line.is_empty() {
+                            1
+                        } else {
+                            wrap_line(line, wrap_w).len() as u16
+                        }
+                    })
+                    .sum()
+            }
         }
     }
 
@@ -102,7 +114,7 @@ impl ConfirmPreview {
         !matches!(self, ConfirmPreview::None | ConfirmPreview::BashBody { .. })
     }
 
-    fn render(&self, out: &mut RenderOut, skip: u16, viewport: u16) {
+    fn render(&self, out: &mut RenderOut, skip: u16, viewport: u16, width: usize) {
         match self {
             ConfirmPreview::None => {}
             ConfirmPreview::Diff { old, new, path } => {
@@ -135,9 +147,17 @@ impl ConfirmPreview {
                 }
             }
             ConfirmPreview::PlanContent { summary } => {
-                let lines: Vec<&str> = summary.lines().collect();
+                let wrap_w = width.saturating_sub(1);
+                let mut wrapped: Vec<String> = Vec::new();
+                for line in summary.lines() {
+                    if line.is_empty() {
+                        wrapped.push(String::new());
+                    } else {
+                        wrapped.extend(wrap_line(line, wrap_w));
+                    }
+                }
                 let mut emitted = 0u16;
-                for (i, line) in lines.iter().enumerate() {
+                for (i, line) in wrapped.iter().enumerate() {
                     if (i as u16) < skip {
                         continue;
                     }
@@ -158,6 +178,7 @@ struct ConfirmLayout {
     summary_rows: u16,
     has_preview: bool,
     viewport_rows: u16,
+    total_preview: u16,
     total_rows: u16,
 }
 
@@ -169,7 +190,6 @@ pub struct ConfirmDialog {
     summary: Option<String>,
     preview: ConfirmPreview,
     options: Vec<(String, ConfirmChoice)>,
-    total_preview: u16,
     preview_scroll: usize,
     selected: usize,
     textarea: TextArea,
@@ -217,7 +237,6 @@ impl ConfirmDialog {
         }
 
         let preview = ConfirmPreview::from_tool(tool_name, desc, args);
-        let total_preview = preview.total_rows();
 
         let display_name = if is_plan { "plan" } else { tool_name };
 
@@ -228,7 +247,6 @@ impl ConfirmDialog {
             summary: summary.map(|s| s.to_string()),
             preview,
             options,
-            total_preview,
             preview_scroll: 0,
             selected: 0,
             textarea: TextArea::new(),
@@ -242,6 +260,11 @@ impl ConfirmDialog {
 }
 
 impl ConfirmDialog {
+    fn preview_total_rows(&self) -> usize {
+        let w = terminal::size().map(|(w, _)| w as usize).unwrap_or(80);
+        self.preview.total_rows(w) as usize
+    }
+
     fn layout(&self, width: u16, height: u16) -> ConfirmLayout {
         let w = width as usize;
         let ta_visible = self.editing || !self.textarea.is_empty();
@@ -289,9 +312,10 @@ impl ConfirmDialog {
             + ta_extra
             + 2;
 
+        let total_preview = self.preview.total_rows(w);
         let viewport_rows: u16 = if has_preview {
             let space = height.saturating_sub(fixed_rows);
-            space.max(1).min(self.total_preview)
+            space.max(1).min(total_preview)
         } else {
             0
         };
@@ -301,6 +325,7 @@ impl ConfirmDialog {
             summary_rows,
             has_preview,
             viewport_rows,
+            total_preview,
             total_rows: fixed_rows + viewport_rows,
         }
     }
@@ -403,19 +428,19 @@ impl super::Dialog for ConfirmDialog {
             }
             // Preview scrolling
             (KeyCode::Char('d'), m) if m.contains(KeyModifiers::CONTROL) => {
-                if self.total_preview > 0 {
+                let tp = self.preview_total_rows();
+                if tp > 0 {
                     let half = 10usize;
-                    self.preview_scroll =
-                        (self.preview_scroll + half).min(self.total_preview as usize);
+                    self.preview_scroll = (self.preview_scroll + half).min(tp);
                 }
             }
             (KeyCode::Char('u'), m) if m.contains(KeyModifiers::CONTROL) => {
                 self.preview_scroll = self.preview_scroll.saturating_sub(10);
             }
             (KeyCode::PageDown, _) => {
-                if self.total_preview > 0 {
-                    self.preview_scroll =
-                        (self.preview_scroll + 20).min(self.total_preview as usize);
+                let tp = self.preview_total_rows();
+                if tp > 0 {
+                    self.preview_scroll = (self.preview_scroll + 20).min(tp);
                 }
             }
             (KeyCode::PageUp, _) => {
@@ -450,7 +475,7 @@ impl super::Dialog for ConfirmDialog {
         let ta_visible = self.editing || !self.textarea.is_empty();
 
         // Clamp scroll
-        let max_scroll = (self.total_preview as usize).saturating_sub(ly.viewport_rows as usize);
+        let max_scroll = (ly.total_preview as usize).saturating_sub(ly.viewport_rows as usize);
         self.preview_scroll = self.preview_scroll.min(max_scroll);
 
         let (bar_row, _) = begin_dialog_draw(
@@ -493,7 +518,13 @@ impl super::Dialog for ConfirmDialog {
         } else {
             row = bar_row;
 
-            draw_bar(&mut out, w, None, None, theme::accent());
+            let is_plan = matches!(self.preview, ConfirmPreview::PlanContent { .. });
+            let title_color = if is_plan {
+                theme::PLAN
+            } else {
+                theme::accent()
+            };
+            draw_bar(&mut out, w, None, None, title_color);
             crlf(&mut out);
             row += 1;
 
@@ -515,7 +546,7 @@ impl super::Dialog for ConfirmDialog {
             for (i, seg) in segments.iter().enumerate() {
                 if i == 0 {
                     let _ = out.queue(Print(" "));
-                    let _ = out.queue(SetForegroundColor(theme::accent()));
+                    let _ = out.queue(SetForegroundColor(title_color));
                     let _ = out.queue(Print(&self.display_name));
                     let _ = out.queue(ResetColor);
                     let _ = out.queue(Print(": "));
@@ -556,15 +587,15 @@ impl super::Dialog for ConfirmDialog {
                     row += 1;
                 }
                 self.preview
-                    .render(&mut out, self.preview_scroll as u16, ly.viewport_rows);
+                    .render(&mut out, self.preview_scroll as u16, ly.viewport_rows, w);
                 row += ly.viewport_rows;
                 // Bottom separator -- show scroll indicator when content is clipped
                 let _ = out.queue(SetForegroundColor(theme::BAR));
-                if self.total_preview > ly.viewport_rows {
+                if ly.total_preview > ly.viewport_rows {
                     let pos = format!(
                         " [{}/{}]",
                         self.preview_scroll + ly.viewport_rows as usize,
-                        self.total_preview
+                        ly.total_preview
                     );
                     let sep_len = w.saturating_sub(pos.len());
                     let _ = out.queue(Print("\u{254c}".repeat(sep_len)));
@@ -641,14 +672,14 @@ impl super::Dialog for ConfirmDialog {
         if self.editing {
             let _ = out.queue(Print(" enter: send  esc: cancel"));
         } else if !self.textarea.is_empty() {
-            if self.total_preview > 0 {
+            if ly.total_preview > 0 {
                 let _ = out.queue(Print(
                     " enter: confirm with message  tab: edit  ctrl+u/d: scroll",
                 ));
             } else {
                 let _ = out.queue(Print(" enter: confirm with message  tab: edit"));
             }
-        } else if self.total_preview > 0 {
+        } else if ly.total_preview > 0 {
             let _ = out.queue(Print(
                 " enter: confirm  tab: add message  ctrl+u/d: scroll  esc: cancel",
             ));

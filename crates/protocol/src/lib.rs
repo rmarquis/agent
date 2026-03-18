@@ -249,10 +249,13 @@ pub enum EngineEvent {
     CompactionComplete { messages: Vec<Message> },
 
     /// Response to `UiCommand::GenerateTitle`.
-    TitleGenerated { title: String },
+    TitleGenerated { title: String, slug: String },
 
     /// Response to `UiCommand::Btw`.
     BtwResponse { content: String },
+
+    /// Predicted next user input (ghost text autocomplete).
+    InputPrediction { text: String },
 
     /// Snapshot of the engine's message list, sent after each significant step.
     Messages {
@@ -348,6 +351,14 @@ pub enum UiCommand {
         history: Vec<Message>,
         model: String,
         reasoning_effort: ReasoningEffort,
+        api_base: Option<String>,
+        api_key: Option<String>,
+    },
+
+    /// Predict the user's next input based on conversation history.
+    PredictInput {
+        history: Vec<Message>,
+        model: String,
         api_base: Option<String>,
         api_key: Option<String>,
     },

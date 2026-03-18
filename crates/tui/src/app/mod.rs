@@ -57,6 +57,8 @@ pub struct App {
     /// Context for the currently-open confirm dialog, used to re-check
     /// permissions when the user toggles mode.
     confirm_context: Option<ConfirmContext>,
+    /// Ghost text prediction for the input field.
+    pub input_prediction: Option<String>,
     pending_title: bool,
     last_width: u16,
     last_height: u16,
@@ -316,6 +318,7 @@ impl App {
             engine,
             permissions,
             confirm_context: None,
+            input_prediction: None,
             pending_title: false,
             last_width: terminal::size().map(|(w, _)| w).unwrap_or(80),
             last_height: terminal::size().map(|(_, h)| h).unwrap_or(24),
@@ -339,6 +342,9 @@ impl App {
             self.rebuild_screen_from_history();
             if let Some(tokens) = self.session.context_tokens {
                 self.screen.set_context_tokens(tokens);
+            }
+            if let Some(ref slug) = self.session.slug {
+                self.screen.set_task_label(slug.clone());
             }
             self.screen.flush_blocks();
         }

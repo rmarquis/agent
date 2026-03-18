@@ -1,6 +1,6 @@
 use crate::log;
 use crate::permissions::{Decision, Permissions};
-use crate::provider::{Provider, ProviderError, ToolDefinition};
+use crate::provider::{self, Provider, ProviderError, ToolDefinition};
 use crate::tools::{self, ToolContext, ToolRegistry, ToolResult};
 use crate::EngineConfig;
 use protocol::{
@@ -92,6 +92,9 @@ pub async fn engine_task(
                     UiCommand::Btw { question, history, model, reasoning_effort, api_base, api_key } => {
                         spawn_btw_request(&config, &client, &model, reasoning_effort, question, history, api_base, api_key, &event_tx);
                     }
+                    UiCommand::PredictInput { history, model, api_base, api_key } => {
+                        spawn_predict_request(&config, &client, &model, history, api_base, api_key, &event_tx);
+                    }
                     _ => {} // Steer, Cancel, etc. only relevant during a turn
                 }
             }
@@ -124,14 +127,15 @@ fn spawn_title_generation(
             &serde_json::json!({"message_count": user_messages.len(), "model": &model}),
         );
         match provider.complete_title(&user_messages, &model).await {
-            Ok(ref title) => {
+            Ok((ref title, ref slug)) => {
                 log::entry(
                     log::Level::Info,
                     "title_result",
-                    &serde_json::json!({"title": title}),
+                    &serde_json::json!({"title": title, "slug": slug}),
                 );
                 let _ = tx.send(EngineEvent::TitleGenerated {
                     title: title.clone(),
+                    slug: slug.clone(),
                 });
             }
             Err(ref e) => {
@@ -148,9 +152,9 @@ fn spawn_title_generation(
                 if title.len() > 48 {
                     title.truncate(title.floor_char_boundary(48));
                 }
-                let _ = tx.send(EngineEvent::TitleGenerated {
-                    title: title.trim().to_string(),
-                });
+                let title = title.trim().to_string();
+                let slug = provider::slugify(&title);
+                let _ = tx.send(EngineEvent::TitleGenerated { title, slug });
             }
         }
     });
@@ -204,6 +208,86 @@ fn spawn_btw_request(
             Err(e) => format!("error: {e}"),
         };
         let _ = tx.send(EngineEvent::BtwResponse { content });
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_predict_request(
+    config: &EngineConfig,
+    client: &reqwest::Client,
+    model: &str,
+    history: Vec<protocol::Message>,
+    api_base: Option<String>,
+    api_key: Option<String>,
+    event_tx: &mpsc::UnboundedSender<EngineEvent>,
+) {
+    let provider =
+        build_provider_with_overrides(config, client, api_base.as_deref(), api_key.as_deref());
+    let model = model.to_string();
+    let tx = event_tx.clone();
+    tokio::spawn(async move {
+        let system = "You predict what a user will type next in a coding assistant conversation. \
+                      Reply with ONLY the predicted message — no quotes, no explanation, \
+                      no preamble. Keep it short (one sentence max). If you cannot predict, \
+                      reply with an empty string.";
+
+        // Extract the last assistant message text to include in the user prompt.
+        let assistant_text = history
+            .last()
+            .and_then(|m| m.content.as_ref())
+            .map(|c| c.text_content())
+            .unwrap_or_default();
+
+        // Truncate to last 500 chars to keep the request small.
+        let truncated = if assistant_text.len() > 500 {
+            &assistant_text[assistant_text.len() - 500..]
+        } else {
+            &assistant_text
+        };
+
+        let user_msg = format!(
+            "The coding assistant just said:\n\n{truncated}\n\nPredict the user's next message."
+        );
+
+        let messages = vec![
+            protocol::Message {
+                role: protocol::Role::System,
+                content: Some(protocol::Content::text(system)),
+                reasoning_content: None,
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            protocol::Message {
+                role: protocol::Role::User,
+                content: Some(protocol::Content::text(&user_msg)),
+                reasoning_content: None,
+                tool_calls: None,
+                tool_call_id: None,
+            },
+        ];
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            provider.chat(
+                &messages,
+                &[],
+                &model,
+                protocol::ReasoningEffort::Off,
+                &cancel,
+                None,
+            ),
+        )
+        .await
+        {
+            Ok(Ok(resp)) => {
+                let text = resp.content.unwrap_or_default().trim().to_string();
+                if !text.is_empty() {
+                    let _ = tx.send(EngineEvent::InputPrediction { text });
+                }
+            }
+            _ => {}
+        }
     });
 }
 
@@ -332,7 +416,6 @@ impl<'a> Turn<'a> {
             });
         }
 
-        let tool_defs: Vec<ToolDefinition> = self.registry.definitions(self.permissions, self.mode);
         let mut first = true;
         let mut empty_retries: u8 = 0;
         const MAX_EMPTY_RETRIES: u8 = 2;
@@ -342,6 +425,11 @@ impl<'a> Turn<'a> {
                 self.drain_commands();
             }
             first = false;
+
+            // Recompute tool definitions each iteration — mode may have
+            // changed (e.g. Plan → Apply after plan approval).
+            let tool_defs: Vec<ToolDefinition> =
+                self.registry.definitions(self.permissions, self.mode);
 
             if self.cancel.is_cancelled() {
                 self.messages.remove(0);

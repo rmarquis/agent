@@ -14,6 +14,8 @@ pub struct Session {
     #[serde(default)]
     pub title: Option<String>,
     #[serde(default)]
+    pub slug: Option<String>,
+    #[serde(default)]
     pub first_user_message: Option<String>,
     #[serde(default)]
     pub created_at_ms: u64,
@@ -40,6 +42,8 @@ pub struct SessionMeta {
     pub id: String,
     #[serde(default)]
     pub title: Option<String>,
+    #[serde(default)]
+    pub slug: Option<String>,
     #[serde(default)]
     pub first_user_message: Option<String>,
     #[serde(default)]
@@ -76,6 +80,7 @@ impl Session {
         Self {
             id,
             title: None,
+            slug: None,
             first_user_message: None,
             created_at_ms: now,
             updated_at_ms: now,
@@ -93,6 +98,7 @@ impl Session {
         SessionMeta {
             id: self.id.clone(),
             title: self.title.clone(),
+            slug: self.slug.clone(),
             first_user_message: self.first_user_message.clone(),
             created_at_ms: self.created_at_ms,
             updated_at_ms: self.updated_at_ms,
@@ -111,6 +117,7 @@ impl Session {
         Self {
             id: new_session_id(now),
             title: self.title.clone(),
+            slug: self.slug.clone(),
             first_user_message: self.first_user_message.clone(),
             created_at_ms: now,
             updated_at_ms: now,

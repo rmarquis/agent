@@ -80,12 +80,14 @@ impl WorkingState {
                     BarSpan {
                         text: format!("{} compacting", SPINNER_FRAMES[idx]),
                         color: Color::Reset,
+                        bg: None,
                         attr: Some(Attribute::Bold),
                         priority: 0,
                     },
                     BarSpan {
                         text: format!(" {}", format_duration(elapsed.as_secs())),
                         color: theme::MUTED,
+                        bg: None,
                         attr: Some(Attribute::Dim),
                         priority: 0,
                     },
@@ -106,12 +108,14 @@ impl WorkingState {
                     BarSpan {
                         text: format!("{} working", SPINNER_FRAMES[idx]),
                         color: spinner_color,
+                        bg: None,
                         attr: Some(Attribute::Bold),
                         priority: 0,
                     },
                     BarSpan {
                         text: format!(" {}", format_duration(elapsed.as_secs())),
                         color: theme::MUTED,
+                        bg: None,
                         attr: Some(Attribute::Dim),
                         priority: 0,
                     },
@@ -121,12 +125,14 @@ impl WorkingState {
                         spans.push(BarSpan {
                             text: " · ".into(),
                             color: theme::MUTED,
+                            bg: None,
                             attr: Some(Attribute::Dim),
                             priority: 3, // drop first
                         });
                         spans.push(BarSpan {
                             text: format!("{:.1} tok/s", avg),
                             color: theme::MUTED,
+                            bg: None,
                             attr: Some(Attribute::Dim),
                             priority: 3, // drop first
                         });
@@ -140,6 +146,7 @@ impl WorkingState {
                     spans.push(BarSpan {
                         text: format!(" (retrying in {}s #{})", remaining.as_secs(), attempt),
                         color: theme::MUTED,
+                        bg: None,
                         attr: Some(Attribute::Dim),
                         priority: 0,
                     });
@@ -151,6 +158,7 @@ impl WorkingState {
                 let mut spans = vec![BarSpan {
                     text: format!("done {}", format_duration(secs)),
                     color: theme::MUTED,
+                    bg: None,
                     attr: Some(Attribute::Dim),
                     priority: 0,
                 }];
@@ -159,12 +167,14 @@ impl WorkingState {
                         spans.push(BarSpan {
                             text: " · ".into(),
                             color: theme::MUTED,
+                            bg: None,
                             attr: Some(Attribute::Dim),
                             priority: 3,
                         });
                         spans.push(BarSpan {
                             text: format!("{:.1} tok/s", avg),
                             color: theme::MUTED,
+                            bg: None,
                             attr: Some(Attribute::Dim),
                             priority: 3,
                         });
@@ -176,6 +186,7 @@ impl WorkingState {
                 vec![BarSpan {
                     text: "interrupted".into(),
                     color: theme::MUTED,
+                    bg: None,
                     attr: Some(Attribute::Dim),
                     priority: 0,
                 }]

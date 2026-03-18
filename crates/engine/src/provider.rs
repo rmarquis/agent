@@ -495,24 +495,84 @@ impl Provider {
         &self,
         user_messages: &[String],
         model: &str,
-    ) -> Result<String, String> {
+    ) -> Result<(String, String), String> {
         let numbered: Vec<String> = user_messages
             .iter()
             .enumerate()
             .map(|(i, m)| format!("{}. {}", i + 1, m.replace('\n', " ")))
             .collect();
         let prompt = format!(
-            "Generate a short session title (3-6 words) for a coding session. \
+            "Generate a short session title and slug for a coding session. \
              Focus on the most recent topic/task, not earlier ones. \
-             Reply with only the title, no quotes.\n\n\
+             Reply with exactly two lines, no quotes:\n\
+             title: <3-6 word title>\n\
+             slug: <2-4 lowercase words separated by dashes, like a git branch name>\n\n\
              User messages (oldest to newest):\n{}",
             numbered.join("\n")
         );
 
-        let title = self.complete_short(&prompt, model, 512, 0.2).await?;
+        let raw = self.complete_short(&prompt, model, 512, 0.2).await?;
+        let (title, slug) = parse_title_and_slug(&raw);
 
-        Ok(title)
+        Ok((title, slug))
     }
+}
+
+fn parse_title_and_slug(raw: &str) -> (String, String) {
+    let mut title = String::new();
+    let mut slug = String::new();
+
+    for line in raw.lines() {
+        let line = line.trim();
+        if let Some(rest) = line
+            .strip_prefix("title:")
+            .or_else(|| line.strip_prefix("Title:"))
+        {
+            title = rest.trim().trim_matches('"').trim_matches('\'').to_string();
+        } else if let Some(rest) = line
+            .strip_prefix("slug:")
+            .or_else(|| line.strip_prefix("Slug:"))
+        {
+            slug = rest.trim().trim_matches('"').trim_matches('\'').to_string();
+        }
+    }
+
+    // Fallback: if no structured parse, treat entire response as title
+    if title.is_empty() {
+        title = normalize_short(raw);
+    }
+
+    // Fallback: slugify the title
+    if slug.is_empty() {
+        slug = slugify(&title);
+    }
+
+    // Enforce slug constraints
+    slug = slug
+        .split('-')
+        .filter(|w| !w.is_empty())
+        .take(4)
+        .collect::<Vec<_>>()
+        .join("-");
+
+    if title.len() > 64 {
+        title.truncate(title.floor_char_boundary(64));
+        title = title.trim().to_string();
+    }
+
+    (title, slug)
+}
+
+pub fn slugify(title: &str) -> String {
+    title
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
 }
 
 fn normalize_short(raw: &str) -> String {

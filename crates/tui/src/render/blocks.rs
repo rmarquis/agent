@@ -497,7 +497,32 @@ fn render_markdown(
     indent: &str,
     dim: bool,
 ) -> u16 {
-    let max_cols = width.saturating_sub(indent.len() + 1);
+    render_markdown_inner(out, content, width, indent, dim, None)
+}
+
+fn render_markdown_boxed(
+    out: &mut RenderOut,
+    content: &str,
+    width: usize,
+    dim: bool,
+    bctx: &super::BoxContext,
+) -> u16 {
+    render_markdown_inner(out, content, width, bctx.left, dim, Some(bctx))
+}
+
+fn render_markdown_inner(
+    out: &mut RenderOut,
+    content: &str,
+    width: usize,
+    indent: &str,
+    dim: bool,
+    bctx: Option<&super::BoxContext>,
+) -> u16 {
+    let max_cols = if let Some(b) = bctx {
+        b.inner_w
+    } else {
+        width.saturating_sub(indent.len() + 1)
+    };
     let lines: Vec<&str> = content.lines().collect();
     let mut i = 0;
     let mut rows = 0u16;
@@ -513,7 +538,7 @@ fn render_markdown(
             if i < lines.len() {
                 i += 1;
             }
-            rows += render_code_block(out, code_lines, lang, width, dim);
+            rows += render_code_block(out, code_lines, lang, width, dim, bctx);
             // Skip blank lines after code block — the border provides spacing.
             while i < lines.len() && lines[i].trim().is_empty() {
                 i += 1;
@@ -523,7 +548,7 @@ fn render_markdown(
             while i < lines.len() && lines[i].trim_start().starts_with('|') {
                 i += 1;
             }
-            rows += render_markdown_table(out, &lines[table_start..i], dim);
+            rows += render_markdown_table(out, &lines[table_start..i], dim, bctx);
         } else {
             // Skip blank lines before a code fence — the border provides spacing.
             let is_blank = lines[i].trim().is_empty();
@@ -539,8 +564,14 @@ fn render_markdown(
             }
             let segments = wrap_line(lines[i], max_cols);
             for seg in &segments {
-                let _ = out.queue(Print(indent));
-                print_styled_dim(out, seg, dim);
+                if let Some(b) = bctx {
+                    b.print_left(out);
+                    print_styled_dim(out, seg, dim);
+                    b.print_right(out, seg.chars().count());
+                } else {
+                    let _ = out.queue(Print(indent));
+                    print_styled_dim(out, seg, dim);
+                }
                 crlf(out);
             }
             i += 1;
@@ -551,9 +582,15 @@ fn render_markdown(
 }
 
 fn render_plan_output(out: &mut RenderOut, content: &str, width: usize) -> u16 {
-    // Skip the first line ("Plan saved to ...") for the bordered display.
+    // Skip the first line ("Plan saved to ...") and the trailing
+    // "The user approved..." instruction for the bordered display.
     let body = if let Some(pos) = content.find("\n\n") {
-        &content[pos + 2..]
+        let rest = &content[pos + 2..];
+        if let Some(end) = rest.rfind("\n\nThe user approved") {
+            &rest[..end]
+        } else {
+            rest
+        }
     } else {
         content
     };
@@ -562,44 +599,38 @@ fn render_plan_output(out: &mut RenderOut, content: &str, width: usize) -> u16 {
         return 0;
     }
 
-    let inner_w = width.saturating_sub(6); // "   │ " prefix + " │" suffix area
+    // Box geometry: "   │ " (5) + content + " │" (2) = 7 overhead
+    let inner_w = width.saturating_sub(7);
     let mut rows = 0u16;
 
-    // Top border: "   ┌─ Plan ─────┐"
+    // Top border: "   ┌─ Plan ──...──┐"
+    // 3 + 1(┌) + 1(─) + 6(label) + fill + 1(┐) = 5 + inner_w + 2
     let label = " Plan ";
-    let border_right = inner_w.saturating_sub(label.len() + 1);
-    let _ = out.queue(SetForegroundColor(theme::accent()));
+    let fill = inner_w.saturating_sub(label.len()).saturating_add(1);
+    let _ = out.queue(SetForegroundColor(theme::PLAN));
     let _ = out.queue(Print(format!(
-        "   \u{250c}\u{2500}{label}{}",
-        "\u{2500}".repeat(border_right)
+        "   \u{250c}\u{2500}{label}{}\u{2510}",
+        "\u{2500}".repeat(fill)
     )));
     let _ = out.queue(ResetColor);
     crlf(out);
     rows += 1;
 
-    // Body lines
-    for line in body.lines() {
-        let segments = wrap_line(line, inner_w);
-        for seg in &segments {
-            let char_count = seg.chars().count();
-            let padding = inner_w.saturating_sub(char_count);
-            let _ = out.queue(SetForegroundColor(theme::accent()));
-            let _ = out.queue(Print("   \u{2502} "));
-            let _ = out.queue(ResetColor);
-            let _ = out.queue(SetAttribute(Attribute::Dim));
-            let _ = out.queue(Print(seg));
-            let _ = out.queue(SetAttribute(Attribute::Reset));
-            let _ = out.queue(Print(" ".repeat(padding)));
-            crlf(out);
-            rows += 1;
-        }
-    }
+    // Body: markdown rendering inside the plan box.
+    let bctx = super::BoxContext {
+        left: "   \u{2502} ",
+        right: " \u{2502}",
+        color: theme::PLAN,
+        inner_w,
+    };
+    rows += render_markdown_boxed(out, body, width, false, &bctx);
 
-    // Bottom border: "   └─────────────┘"
-    let _ = out.queue(SetForegroundColor(theme::accent()));
+    // Bottom border: "   └──...──┘"
+    // 3 + 1(└) + dashes + 1(┘) = 5 + inner_w + 2 → dashes = inner_w + 2
+    let _ = out.queue(SetForegroundColor(theme::PLAN));
     let _ = out.queue(Print(format!(
-        "   \u{2514}{}",
-        "\u{2500}".repeat(inner_w + 1)
+        "   \u{2514}{}\u{2518}",
+        "\u{2500}".repeat(inner_w + 2)
     )));
     let _ = out.queue(ResetColor);
     crlf(out);

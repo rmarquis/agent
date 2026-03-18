@@ -4,12 +4,14 @@ impl App {
     // ── Agent lifecycle ──────────────────────────────────────────────────
 
     pub(super) fn begin_agent_turn(&mut self, display: &str, content: Content) -> TurnState {
+        self.input_prediction = None;
         self.screen.begin_turn();
         self.show_user_message(display, content.image_labels());
         let text = content.text_content();
         if self.session.first_user_message.is_none() {
             self.session.first_user_message = Some(text.clone());
         }
+        self.maybe_generate_title(Some(&text));
         self.screen.set_throbber(render::Throbber::Working);
 
         let turn_id = self.next_turn_id;
@@ -137,6 +139,7 @@ impl App {
         if self.session.first_user_message.is_none() {
             self.session.first_user_message = Some(display.clone());
         }
+        self.maybe_generate_title(Some(&evaluated));
         self.screen.set_throbber(render::Throbber::Working);
 
         let turn_id = self.next_turn_id;
@@ -190,9 +193,25 @@ impl App {
             }
         } else {
             self.screen.set_throbber(render::Throbber::Done);
+            // Fire async prediction for the user's next input.
+            self.input_prediction = None;
+            // Only send the last assistant message, not the full history.
+            let last_assistant = self
+                .history
+                .iter()
+                .rev()
+                .find(|m| m.role == protocol::Role::Assistant)
+                .cloned();
+            if let Some(msg) = last_assistant {
+                self.engine.send(UiCommand::PredictInput {
+                    history: vec![msg],
+                    model: self.model.clone(),
+                    api_base: Some(self.api_base.clone()),
+                    api_key: Some(std::env::var(&self.api_key_env).unwrap_or_default()),
+                });
+            }
         }
         self.save_session();
-        self.maybe_generate_title();
         state::set_mode(self.mode);
         self.maybe_auto_compact();
     }
@@ -333,14 +352,24 @@ impl App {
                 self.screen.set_throbber(render::Throbber::Done);
                 SessionControl::Continue
             }
-            EngineEvent::TitleGenerated { title } => {
+            EngineEvent::TitleGenerated { title, slug } => {
                 self.session.title = Some(title);
+                self.session.slug = Some(slug.clone());
+                self.screen.set_task_label(slug);
                 self.pending_title = false;
                 self.save_session();
                 SessionControl::Continue
             }
             EngineEvent::BtwResponse { content } => {
                 self.screen.set_btw_response(content);
+                SessionControl::Continue
+            }
+            EngineEvent::InputPrediction { text } => {
+                // Only accept if the user hasn't started typing.
+                if self.input.buf.is_empty() {
+                    self.input_prediction = Some(text);
+                    self.screen.mark_dirty();
+                }
                 SessionControl::Continue
             }
             EngineEvent::Messages {
@@ -402,13 +431,21 @@ impl App {
                 self.screen.notify("conversation compacted".into());
                 self.screen.set_throbber(render::Throbber::Done);
             }
-            EngineEvent::TitleGenerated { title } => {
+            EngineEvent::TitleGenerated { title, slug } => {
                 self.session.title = Some(title);
+                self.session.slug = Some(slug.clone());
+                self.screen.set_task_label(slug);
                 self.pending_title = false;
                 self.save_session();
             }
             EngineEvent::BtwResponse { content } => {
                 self.screen.set_btw_response(content);
+            }
+            EngineEvent::InputPrediction { text } => {
+                if self.input.buf.is_empty() {
+                    self.input_prediction = Some(text);
+                    self.screen.mark_dirty();
+                }
             }
             EngineEvent::ProcessCompleted { id, exit_code } => {
                 let msg = match exit_code {

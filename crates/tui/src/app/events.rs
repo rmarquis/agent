@@ -350,6 +350,23 @@ impl App {
             t.last_esc = None;
         }
 
+        // Ghost-text prediction: Tab accepts, any other key dismisses.
+        if self.input_prediction.is_some() && self.input.buf.is_empty() {
+            if matches!(
+                ev,
+                Event::Key(KeyEvent {
+                    code: KeyCode::Tab,
+                    ..
+                })
+            ) {
+                self.input.buf = self.input_prediction.take().unwrap();
+                self.input.cpos = self.input.buf.len();
+                self.screen.mark_dirty();
+                return EventOutcome::Redraw;
+            }
+            self.input_prediction = None;
+        }
+
         // Delegate to InputState::handle_event
         match self.input.handle_event(ev, Some(&mut self.input_history)) {
             Action::Submit { content, display } => {
@@ -642,6 +659,7 @@ impl App {
                     state: &self.input,
                     mode: self.mode,
                     queued: &self.queued_messages,
+                    prediction: None,
                 }),
             );
         } else {
@@ -651,6 +669,7 @@ impl App {
                     state: &self.input,
                     mode: self.mode,
                     queued: &[],
+                    prediction: self.input_prediction.as_deref(),
                 }),
             );
         }

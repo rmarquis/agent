@@ -42,7 +42,10 @@ impl Tool for ExitPlanModeTool {
                 Ok(path) => {
                     let display_path = path.display().to_string();
                     ToolResult {
-                        content: format!("Plan saved to {display_path}\n\n{summary}"),
+                        content: format!(
+                            "Plan saved to {display_path}\n\n{summary}\n\n\
+                             The user approved this plan. Proceed with the implementation now."
+                        ),
                         is_error: false,
                     }
                 }

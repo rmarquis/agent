@@ -33,6 +33,7 @@ pub(super) fn render_code_block(
     lang: &str,
     width: usize,
     dim: bool,
+    bctx: Option<&super::BoxContext>,
 ) -> u16 {
     let ext = match lang {
         "" => "txt",
@@ -53,7 +54,8 @@ pub(super) fn render_code_block(
         let _ = out.queue(SetAttribute(Attribute::Dim));
     }
     let theme = &THEME_SET[two_face::theme::EmbeddedThemeName::MonokaiExtended];
-    let text_w = width.saturating_sub(1).max(1);
+    let content_width = if let Some(b) = bctx { b.inner_w } else { width };
+    let text_w = content_width.saturating_sub(1).max(1);
     let expanded: Vec<String> = lines.iter().map(|l| l.replace('\t', "    ")).collect();
     let max_len = expanded
         .iter()
@@ -66,16 +68,28 @@ pub(super) fn render_code_block(
     let mut h = HighlightLines::new(syntax, theme);
 
     // Top border: lower one-eighth block in code block bg color
+    if let Some(b) = bctx {
+        b.print_left(out);
+    }
     let _ = out.queue(SetForegroundColor(theme::USER_BG));
     let _ = out.queue(Print("▁".repeat(block_w)));
     let _ = out.queue(ResetColor);
+    if let Some(b) = bctx {
+        b.print_right(out, block_w);
+    }
     crlf(out);
     rows += 1;
 
     // Top padding
+    if let Some(b) = bctx {
+        b.print_left(out);
+    }
     let _ = out.queue(SetBackgroundColor(theme::CODE_BLOCK_BG));
     let _ = out.queue(Print(" ".repeat(block_w)));
     let _ = out.queue(ResetColor);
+    if let Some(b) = bctx {
+        b.print_right(out, block_w);
+    }
     crlf(out);
     rows += 1;
 
@@ -87,6 +101,9 @@ pub(super) fn render_code_block(
             .unwrap_or_default();
         let visual_rows = split_regions_into_rows(&regions, text_w);
         for vrow in &visual_rows {
+            if let Some(b) = bctx {
+                b.print_left(out);
+            }
             let cols = print_split_regions(out, vrow, Some(theme::CODE_BLOCK_BG));
             let pad = block_w.saturating_sub(cols);
             if pad > 0 {
@@ -94,22 +111,37 @@ pub(super) fn render_code_block(
                 let _ = out.queue(Print(" ".repeat(pad)));
             }
             let _ = out.queue(ResetColor);
+            if let Some(b) = bctx {
+                b.print_right(out, block_w);
+            }
             crlf(out);
         }
         rows += visual_rows.len() as u16;
     }
 
     // Bottom padding
+    if let Some(b) = bctx {
+        b.print_left(out);
+    }
     let _ = out.queue(SetBackgroundColor(theme::CODE_BLOCK_BG));
     let _ = out.queue(Print(" ".repeat(block_w)));
     let _ = out.queue(ResetColor);
+    if let Some(b) = bctx {
+        b.print_right(out, block_w);
+    }
     crlf(out);
     rows += 1;
 
     // Bottom border: upper one-eighth block in code block bg color
+    if let Some(b) = bctx {
+        b.print_left(out);
+    }
     let _ = out.queue(SetForegroundColor(theme::USER_BG));
     let _ = out.queue(Print("▔".repeat(block_w)));
     let _ = out.queue(ResetColor);
+    if let Some(b) = bctx {
+        b.print_right(out, block_w);
+    }
     crlf(out);
     rows += 1;
 
@@ -975,7 +1007,12 @@ fn strip_markdown_markers(text: &str) -> String {
     out
 }
 
-pub(super) fn render_markdown_table(out: &mut RenderOut, lines: &[&str], dim: bool) -> u16 {
+pub(super) fn render_markdown_table(
+    out: &mut RenderOut,
+    lines: &[&str],
+    dim: bool,
+    bctx: Option<&super::BoxContext>,
+) -> u16 {
     let mut rows: Vec<Vec<String>> = Vec::new();
     for line in lines {
         let trimmed = line.trim().trim_start_matches('|').trim_end_matches('|');
@@ -999,7 +1036,11 @@ pub(super) fn render_markdown_table(out: &mut RenderOut, lines: &[&str], dim: bo
     }
 
     // Calculate column widths based on visual (stripped) content.
-    let max_table = term_width().saturating_sub(2);
+    let max_table = if let Some(b) = bctx {
+        b.inner_w.saturating_sub(1)
+    } else {
+        term_width().saturating_sub(2)
+    };
     let mut col_widths = vec![0usize; num_cols];
     for row in &rows {
         for (c, cell) in row.iter().enumerate() {
@@ -1092,10 +1133,14 @@ pub(super) fn render_markdown_table(out: &mut RenderOut, lines: &[&str], dim: bo
             let height = wrapped.iter().map(|w| w.len()).max().unwrap_or(1);
 
             for vline in 0..height {
+                if let Some(b) = bctx {
+                    b.print_left(out);
+                }
                 let _ = out.queue(Print(" "));
                 bar(out, dim);
                 let _ = out.queue(Print("┃"));
                 reset(out, dim);
+                let mut line_cols = 2; // " ┃"
                 for (c, width) in widths.iter().enumerate() {
                     let text = wrapped
                         .get(c)
@@ -1113,6 +1158,10 @@ pub(super) fn render_markdown_table(out: &mut RenderOut, lines: &[&str], dim: bo
                     bar(out, dim);
                     let _ = out.queue(Print("┃"));
                     reset(out, dim);
+                    line_cols += width + 3; // " content pad ┃"
+                }
+                if let Some(b) = bctx {
+                    b.print_right(out, line_cols);
                 }
                 crlf(out);
             }
@@ -1122,17 +1171,28 @@ pub(super) fn render_markdown_table(out: &mut RenderOut, lines: &[&str], dim: bo
     // left, horizontal, junction, right
     let render_border =
         |out: &mut RenderOut, widths: &[usize], dim: bool, l: &str, j: &str, r: &str| -> u16 {
+            if let Some(b) = bctx {
+                b.print_left(out);
+            }
             let _ = out.queue(Print(" "));
             bar(out, dim);
             let _ = out.queue(Print(l));
+            let mut line_cols = 2; // " l"
             for (c, width) in widths.iter().enumerate() {
-                let _ = out.queue(Print("━".repeat(width + 2)));
+                let seg = width + 2;
+                let _ = out.queue(Print("━".repeat(seg)));
+                line_cols += seg;
                 if c + 1 < widths.len() {
                     let _ = out.queue(Print(j));
+                    line_cols += 1;
                 }
             }
             let _ = out.queue(Print(r));
+            line_cols += 1;
             reset(out, dim);
+            if let Some(b) = bctx {
+                b.print_right(out, line_cols);
+            }
             crlf(out);
             1
         };

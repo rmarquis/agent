@@ -34,6 +34,7 @@ pub struct FramePrompt<'a> {
     pub state: &'a InputState,
     pub mode: protocol::Mode,
     pub queued: &'a [String],
+    pub prediction: Option<&'a str>,
 }
 
 /// Output wrapper that selects the line-advance strategy.
@@ -103,6 +104,40 @@ pub(super) fn crlf(out: &mut RenderOut) {
 }
 
 pub(super) const SPINNER_FRAMES: &[&str] = &["✿", "❀", "✾", "❁"];
+
+/// Context for rendering content inside a bordered box.
+/// When passed to `render_markdown` and its sub-renderers, each output line
+/// gets a colored left border prefix and a right border suffix with padding.
+pub(super) struct BoxContext {
+    /// Left border string printed before each line (e.g. "   │ ").
+    pub left: &'static str,
+    /// Right border string printed after padding (e.g. " │").
+    pub right: &'static str,
+    /// Color for the border characters.
+    pub color: Color,
+    /// Inner content width (between left and right borders).
+    pub inner_w: usize,
+}
+
+impl BoxContext {
+    /// Print the left border with color.
+    pub fn print_left(&self, out: &mut RenderOut) {
+        let _ = out.queue(SetForegroundColor(self.color));
+        let _ = out.queue(Print(self.left));
+        let _ = out.queue(ResetColor);
+    }
+
+    /// Print right-side padding and border for a line that used `cols` content columns.
+    pub fn print_right(&self, out: &mut RenderOut, cols: usize) {
+        let pad = self.inner_w.saturating_sub(cols);
+        if pad > 0 {
+            let _ = out.queue(Print(" ".repeat(pad)));
+        }
+        let _ = out.queue(SetForegroundColor(self.color));
+        let _ = out.queue(Print(self.right));
+        let _ = out.queue(ResetColor);
+    }
+}
 
 fn reasoning_color(effort: protocol::ReasoningEffort) -> Color {
     match effort {
@@ -326,6 +361,8 @@ pub struct Screen {
     btw: Option<BtwBlock>,
     /// Ephemeral notification shown above the prompt, dismissed on any key.
     notification: Option<Notification>,
+    /// Short task label (slug) shown on the status bar after the throbber.
+    task_label: Option<String>,
 }
 
 /// A short ephemeral notification rendered above the prompt bar.
@@ -373,6 +410,7 @@ impl Screen {
             show_tool_in_dialog: false,
             btw: None,
             notification: None,
+            task_label: None,
         }
     }
 
@@ -728,6 +766,11 @@ impl Screen {
         self.prompt.dirty = true;
     }
 
+    pub fn set_task_label(&mut self, label: String) {
+        self.task_label = Some(label);
+        self.prompt.dirty = true;
+    }
+
     pub fn set_reasoning_effort(&mut self, effort: protocol::ReasoningEffort) {
         self.reasoning_effort = effort;
         self.prompt.dirty = true;
@@ -942,6 +985,7 @@ impl Screen {
         self.prompt.anchor_row = Some(0);
         self.working.clear();
         self.context_tokens = None;
+        self.task_label = None;
         self.has_scrollback = false;
         self.content_start_row = None;
         let mut out = RenderOut::scroll();
@@ -987,6 +1031,7 @@ impl Screen {
                 state,
                 mode,
                 queued: &[],
+                prediction: None,
             }),
         );
     }
@@ -1095,6 +1140,7 @@ impl Screen {
                 p.mode,
                 width,
                 p.queued,
+                p.prediction,
                 self.prompt.prev_rows.saturating_sub(pre_prompt),
                 draw_start_row,
                 pre_prompt,
@@ -1180,6 +1226,7 @@ impl Screen {
         mode: protocol::Mode,
         width: usize,
         queued: &[String],
+        prediction: Option<&str>,
         prev_rows: u16,
         draw_start_row: u16,
         pre_prompt_rows: u16,
@@ -1217,11 +1264,31 @@ impl Screen {
         // Priorities: 0 = always, 1 = context tokens, 2 = model, 3 = tok/s
         let mut throbber_spans = self.working.throbber_spans(self.show_speed);
 
+        if let Some(ref label) = self.task_label {
+            if !throbber_spans.is_empty() {
+                throbber_spans.push(BarSpan {
+                    text: " ".into(),
+                    color: Color::Reset,
+                    bg: None,
+                    attr: None,
+                    priority: 1,
+                });
+            }
+            throbber_spans.push(BarSpan {
+                text: format!(" {} ", label),
+                color: theme::MUTED,
+                bg: Some(Color::AnsiValue(236)),
+                attr: None,
+                priority: 1,
+            });
+        }
+
         let mut right_spans = Vec::new();
         if let Some(ref model) = self.model_label {
             right_spans.push(BarSpan {
                 text: format!(" {}", model),
                 color: theme::MUTED,
+                bg: None,
                 attr: None,
                 priority: 2,
             });
@@ -1230,6 +1297,7 @@ impl Screen {
                 right_spans.push(BarSpan {
                     text: format!(" {}", effort.label()),
                     color: reasoning_color(effort),
+                    bg: None,
                     attr: None,
                     priority: 2,
                 });
@@ -1240,6 +1308,7 @@ impl Screen {
                 right_spans.push(BarSpan {
                     text: " ·".into(),
                     color: bar_color,
+                    bg: None,
                     attr: None,
                     priority: 2,
                 });
@@ -1247,6 +1316,7 @@ impl Screen {
             right_spans.push(BarSpan {
                 text: format!(" {}", format_tokens(tokens)),
                 color: theme::MUTED,
+                bg: None,
                 attr: None,
                 priority: 1,
             });
@@ -1255,6 +1325,7 @@ impl Screen {
             right_spans.push(BarSpan {
                 text: " · ".into(),
                 color: bar_color,
+                bg: None,
                 attr: None,
                 priority: 0,
             });
@@ -1266,6 +1337,7 @@ impl Screen {
             right_spans.push(BarSpan {
                 text: label,
                 color: theme::accent(),
+                bg: None,
                 attr: None,
                 priority: 0,
             });
@@ -1275,6 +1347,7 @@ impl Screen {
                 throbber_spans.push(BarSpan {
                     text: " · ".into(),
                     color: bar_color,
+                    bg: None,
                     attr: None,
                     priority: 0,
                 });
@@ -1282,6 +1355,7 @@ impl Screen {
             throbber_spans.push(BarSpan {
                 text: "permission pending".into(),
                 color: theme::accent(),
+                bg: None,
                 attr: Some(Attribute::Bold),
                 priority: 0,
             });
@@ -1359,6 +1433,7 @@ impl Screen {
 
         // If notification is active and input is empty, render it in the input area.
         let show_notif = self.notification.is_some() && state.buf.is_empty();
+        let show_prediction = !show_notif && prediction.is_some() && state.buf.is_empty();
         if show_notif {
             let notif = self.notification.as_ref().unwrap();
             let _ = out.queue(Print(" "));
@@ -1380,12 +1455,25 @@ impl Screen {
             }
             let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
             let _ = out.queue(Print("\r\n"));
+        } else if show_prediction {
+            let pred = prediction.unwrap();
+            let _ = out.queue(Print(" "));
+            let _ = out.queue(SetAttribute(Attribute::Dim));
+            let msg: String = pred.chars().take(usable.saturating_sub(1)).collect();
+            let _ = out.queue(Print(&msg));
+            let _ = out.queue(SetAttribute(Attribute::Reset));
+            let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
+            let _ = out.queue(Print("\r\n"));
         }
 
         for (li, (line, kinds)) in visual_lines
             .iter()
             .skip(scroll_offset)
-            .take(if show_notif { 0 } else { content_rows })
+            .take(if show_notif || show_prediction {
+                0
+            } else {
+                content_rows
+            })
             .enumerate()
         {
             let abs_idx = scroll_offset + li;
@@ -1437,18 +1525,21 @@ impl Screen {
             protocol::Mode::Plan => vec![BarSpan {
                 text: " plan".into(),
                 color: theme::PLAN,
+                bg: None,
                 attr: None,
                 priority: 0,
             }],
             protocol::Mode::Apply => vec![BarSpan {
                 text: " apply".into(),
                 color: theme::APPLY,
+                bg: None,
                 attr: None,
                 priority: 0,
             }],
             protocol::Mode::Yolo => vec![BarSpan {
                 text: " yolo".into(),
                 color: theme::YOLO,
+                bg: None,
                 attr: None,
                 priority: 0,
             }],
@@ -1962,6 +2053,7 @@ fn wrap_and_locate_cursor(
 pub(super) struct BarSpan {
     text: String,
     color: Color,
+    bg: Option<Color>,
     attr: Option<Attribute>,
     /// Priority for responsive dropping. 0 = always show, higher = drop first.
     priority: u8,
@@ -2061,6 +2153,9 @@ pub(super) fn draw_bar(
             if let Some(attr) = span.attr {
                 let _ = out.queue(SetAttribute(attr));
             }
+            if let Some(bg) = span.bg {
+                let _ = out.queue(SetBackgroundColor(bg));
+            }
             let _ = out.queue(SetForegroundColor(span.color));
             let _ = out.queue(Print(&span.text));
             let _ = out.queue(ResetColor);
@@ -2077,6 +2172,9 @@ pub(super) fn draw_bar(
 
     if !right_filtered.is_empty() {
         for span in &right_filtered {
+            if let Some(bg) = span.bg {
+                let _ = out.queue(SetBackgroundColor(bg));
+            }
             let _ = out.queue(SetForegroundColor(span.color));
             let _ = out.queue(Print(&span.text));
             let _ = out.queue(ResetColor);

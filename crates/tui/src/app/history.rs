@@ -255,7 +255,7 @@ impl App {
         }
     }
 
-    pub(super) fn maybe_generate_title(&mut self) {
+    pub(super) fn maybe_generate_title(&mut self, current_message: Option<&str>) {
         if self.pending_title {
             engine::log::entry(
                 engine::log::Level::Debug,
@@ -264,13 +264,18 @@ impl App {
             );
             return;
         }
-        let user_messages: Vec<String> = self
+        let mut user_messages: Vec<String> = self
             .history
             .iter()
             .filter(|m| matches!(m.role, protocol::Role::User))
             .filter_map(|m| m.content.as_ref().map(|c| c.text_content()))
             .filter(|t| !t.is_empty())
             .collect();
+        if let Some(msg) = current_message {
+            if !msg.is_empty() {
+                user_messages.push(msg.to_string());
+            }
+        }
         if user_messages.is_empty() {
             engine::log::entry(
                 engine::log::Level::Debug,
