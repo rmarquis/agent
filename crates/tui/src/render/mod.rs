@@ -320,6 +320,20 @@ pub struct Screen {
     /// Whether to render the active tool above the dialog in content-only
     /// mode.  Set when tool + dialog fit on screen; cleared on dialog close.
     show_tool_in_dialog: bool,
+    /// Ephemeral btw side-question state, rendered above the prompt.
+    btw: Option<BtwBlock>,
+}
+
+/// State for an in-flight `/btw` side question.
+pub struct BtwBlock {
+    pub question: String,
+    pub image_labels: Vec<String>,
+    pub response: Option<String>,
+    /// Cached wrapped lines for scrolling.
+    wrapped: Vec<String>,
+    scroll_offset: usize,
+    /// Terminal width when lines were last wrapped.
+    wrap_width: usize,
 }
 
 impl Default for Screen {
@@ -347,6 +361,65 @@ impl Screen {
             running_procs: 0,
             show_speed: true,
             show_tool_in_dialog: false,
+            btw: None,
+        }
+    }
+
+    pub fn set_btw(&mut self, question: String, image_labels: Vec<String>) {
+        self.btw = Some(BtwBlock {
+            question,
+            image_labels,
+            response: None,
+            wrapped: Vec::new(),
+            scroll_offset: 0,
+            wrap_width: 0,
+        });
+        self.prompt.dirty = true;
+    }
+
+    pub fn set_btw_response(&mut self, content: String) {
+        if let Some(ref mut btw) = self.btw {
+            btw.response = Some(content);
+            btw.wrapped.clear();
+            btw.scroll_offset = 0;
+            btw.wrap_width = 0;
+            self.prompt.dirty = true;
+        }
+    }
+
+    pub fn dismiss_btw(&mut self) {
+        if self.btw.is_some() {
+            self.btw = None;
+            self.prompt.dirty = true;
+        }
+    }
+
+    pub fn has_btw(&self) -> bool {
+        self.btw.is_some()
+    }
+
+    /// Scroll the btw block. Returns true if state changed.
+    pub fn btw_scroll(&mut self, delta: isize) -> bool {
+        let Some(ref mut btw) = self.btw else {
+            return false;
+        };
+        if btw.wrapped.is_empty() {
+            return false;
+        }
+        let term_h = terminal::size().map(|(_, h)| h).unwrap_or(24) as usize;
+        let max_lines = (term_h / 2).saturating_sub(4).max(1);
+        let max = btw.wrapped.len().saturating_sub(max_lines);
+        let old = btw.scroll_offset;
+        if delta < 0 {
+            btw.scroll_offset = btw.scroll_offset.saturating_sub((-delta) as usize);
+        } else {
+            btw.scroll_offset = (btw.scroll_offset + delta as usize).min(max);
+        }
+        if btw.scroll_offset != old {
+            self.prompt.dirty = true;
+            true
+        } else {
+            false
         }
     }
 
@@ -1059,7 +1132,7 @@ impl Screen {
     /// Returns (top_row, total_prompt_rows, scrolled).
     #[allow(clippy::too_many_arguments)]
     fn draw_prompt_sections(
-        &self,
+        &mut self,
         out: &mut RenderOut,
         state: &InputState,
         mode: protocol::Mode,
@@ -1080,6 +1153,16 @@ impl Screen {
         let queued_visual = render_queued(out, queued, usable);
         extra_rows += queued_visual;
         let queued_rows = queued_visual as usize;
+        let btw_visual = if let Some(ref mut btw) = self.btw {
+            let term_h = terminal::size().map(|(_, h)| h).unwrap_or(24) as usize;
+            // Cap btw to half the terminal height, minus overhead for bar+input.
+            let max_btw = (term_h / 2).saturating_sub(4);
+            let rows = render_btw(out, btw, usable, max_btw);
+            extra_rows += rows;
+            rows as usize
+        } else {
+            0
+        };
 
         let vi_normal = state.vim_mode() == Some(crate::vim::ViMode::Normal);
         let bar_color = if vi_normal {
@@ -1185,7 +1268,8 @@ impl Screen {
         let display_cursor = map_cursor(state.cursor_char(), &state.buf, &spans);
         let (visual_lines, cursor_line, cursor_col) =
             wrap_and_locate_cursor(&display_buf, &char_kinds, display_cursor, usable);
-        let is_command = crate::completer::Completer::is_command(state.buf.trim());
+        let is_btw = state.buf.starts_with("/btw ");
+        let is_command = is_btw || crate::completer::Completer::is_command(state.buf.trim());
         let is_exec = matches!(state.buf.as_bytes(), [b'!', c, ..] if !c.is_ascii_whitespace());
         let is_exec_invalid = state.buf == "!";
         let total_content_rows = visual_lines.len();
@@ -1240,7 +1324,32 @@ impl Screen {
         {
             let abs_idx = scroll_offset + li;
             let _ = out.queue(Print(" "));
-            if is_command {
+            if is_btw && abs_idx == 0 {
+                // "/btw" prefix in accent, argument text in normal style.
+                let prefix = "/btw";
+                let prefix_len = prefix.len();
+                let _ = out.queue(SetForegroundColor(theme::accent()));
+                if line.len() >= prefix_len {
+                    let _ = out.queue(Print(&line[..prefix_len]));
+                    let _ = out.queue(ResetColor);
+                    let rest = &line[prefix_len..];
+                    if rest.trim().is_empty() && state.buf.ends_with(' ') {
+                        // Show placeholder when only "/btw " typed.
+                        let _ = out.queue(Print(" "));
+                        let _ = out.queue(SetAttribute(Attribute::Dim));
+                        let _ = out.queue(Print("<question>"));
+                        let _ = out.queue(SetAttribute(Attribute::Reset));
+                    } else {
+                        let _ = out.queue(Print(rest));
+                    }
+                } else {
+                    let _ = out.queue(Print(line));
+                    let _ = out.queue(ResetColor);
+                }
+            } else if is_btw {
+                // Wrapped continuation lines of a /btw command — normal style.
+                let _ = out.queue(Print(line));
+            } else if is_command {
                 let _ = out.queue(SetForegroundColor(theme::accent()));
                 let _ = out.queue(Print(line));
                 let _ = out.queue(ResetColor);
@@ -1300,7 +1409,7 @@ impl Screen {
             draw_completions(out, state.completer.as_ref(), comp_rows)
         };
 
-        let total_rows = stash_rows + queued_rows + 1 + content_rows + 1 + comp_rows;
+        let total_rows = stash_rows + queued_rows + btw_visual + 1 + content_rows + 1 + comp_rows;
         let new_rows = total_rows as u16;
 
         if prev_rows > new_rows {
@@ -1439,6 +1548,103 @@ fn render_queued(out: &mut RenderOut, queued: &[String], usable: usize) -> u16 {
             }
         }
     }
+    rows
+}
+
+fn render_btw(out: &mut RenderOut, btw: &mut BtwBlock, usable: usize, max_content_lines: usize) -> u16 {
+    let max_lines = max_content_lines.max(1);
+    let mut rows = 0u16;
+
+    // Header: "/btw" in accent, question with @path and image highlighting.
+    let _ = out.queue(Print(" "));
+    let _ = out.queue(SetForegroundColor(theme::accent()));
+    let _ = out.queue(Print("/btw"));
+    let _ = out.queue(ResetColor);
+    let _ = out.queue(Print(" "));
+    let max_q = usable.saturating_sub(6); // " /btw " = 6 chars
+    let q: String = btw.question.chars().take(max_q).collect();
+    blocks::print_user_highlights(out, &q, &btw.image_labels, false);
+    let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
+    let _ = out.queue(Print("\r\n"));
+    rows += 1;
+
+    // Body: response or spinner.
+    match btw.response {
+        Some(ref text) => {
+            let wrap_w = usable.saturating_sub(3);
+
+            // Rebuild wrapped line cache on width change or first render.
+            if btw.wrapped.is_empty() || btw.wrap_width != wrap_w {
+                btw.wrapped.clear();
+                for line in text.lines() {
+                    if line.is_empty() {
+                        btw.wrapped.push(String::new());
+                    } else {
+                        btw.wrapped.extend(wrap_line(line, wrap_w));
+                    }
+                }
+                if btw.wrapped.is_empty() {
+                    btw.wrapped.push(String::new());
+                }
+                btw.wrap_width = wrap_w;
+                // Clamp scroll.
+                let max = btw.wrapped.len().saturating_sub(max_lines);
+                btw.scroll_offset = btw.scroll_offset.min(max);
+            }
+
+            let total = btw.wrapped.len();
+            let visible = total.min(max_lines);
+            let can_scroll = total > max_lines;
+
+            for line in btw.wrapped.iter().skip(btw.scroll_offset).take(visible) {
+                let _ = out.queue(Print("   "));
+                let _ = out.queue(Print(line));
+                let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
+                let _ = out.queue(Print("\r\n"));
+                rows += 1;
+            }
+
+            // Blank line before hint.
+            let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
+            let _ = out.queue(Print("\r\n"));
+            rows += 1;
+
+            // Scroll hint or dismiss hint.
+            let _ = out.queue(SetForegroundColor(theme::MUTED));
+            if can_scroll {
+                let end = (btw.scroll_offset + visible).min(total);
+                let _ = out.queue(Print(format!(
+                    "   [{end}/{total}]  ctrl+u/d scroll · esc dismiss"
+                )));
+            } else {
+                let _ = out.queue(Print("   esc dismiss"));
+            }
+            let _ = out.queue(ResetColor);
+            let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
+            let _ = out.queue(Print("\r\n"));
+            rows += 1;
+        }
+        None => {
+            let frame = (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+                / 150) as usize
+                % SPINNER_FRAMES.len();
+            let _ = out.queue(SetForegroundColor(theme::MUTED));
+            let _ = out.queue(Print(format!("   {} thinking", SPINNER_FRAMES[frame])));
+            let _ = out.queue(ResetColor);
+            let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
+            let _ = out.queue(Print("\r\n"));
+            rows += 1;
+        }
+    }
+
+    // Blank separator line before the bar.
+    let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
+    let _ = out.queue(Print("\r\n"));
+    rows += 1;
+
     rows
 }
 

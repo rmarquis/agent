@@ -56,6 +56,52 @@ impl App {
                 self.fork_session();
                 CommandAction::Continue
             }
+            "/model" => {
+                let models: Vec<(String, String, String)> = self
+                    .available_models
+                    .iter()
+                    .map(|m| (m.key.clone(), m.model_name.clone(), m.provider_name.clone()))
+                    .collect();
+                if !models.is_empty() {
+                    self.input.open_model_picker(models);
+                    self.screen.mark_dirty();
+                }
+                CommandAction::Continue
+            }
+            "/settings" => {
+                self.input.open_settings(
+                    self.input.vim_enabled(),
+                    self.auto_compact,
+                    self.show_speed,
+                    self.restrict_to_workspace,
+                );
+                self.screen.mark_dirty();
+                CommandAction::Continue
+            }
+            "/theme" => {
+                self.input.open_theme_picker();
+                self.screen.mark_dirty();
+                CommandAction::Continue
+            }
+            "/stats" => {
+                let entries = crate::metrics::load();
+                let lines = crate::metrics::render_stats(&entries);
+                self.input.open_stats(lines);
+                self.screen.mark_dirty();
+                CommandAction::Continue
+            }
+            _ if input.starts_with("/btw ") => {
+                let question = input[5..].trim().to_string();
+                if question.is_empty() {
+                    self.screen.push(Block::Error {
+                        message: "usage: /btw <question>".into(),
+                    });
+                    self.screen.flush_blocks();
+                } else {
+                    self.start_btw(question.clone(), question, vec![]);
+                }
+                CommandAction::Continue
+            }
             _ if input.starts_with('!') && !self.input.skip_shell_escape() => {
                 self.run_shell_escape(&input[1..]);
                 CommandAction::Continue
@@ -76,7 +122,16 @@ impl App {
         {
             return None;
         }
-        if input.starts_with('/') && !crate::completer::Completer::is_command(input) {
+        if input.starts_with('/')
+            && !input.starts_with("/btw ")
+            && !crate::completer::Completer::is_command(input)
+        {
+            return None;
+        }
+
+        // Custom commands need their own agent turn — queue them like regular
+        // messages so they run after the current turn finishes.
+        if input.starts_with('/') && crate::custom_commands::resolve(input).is_some() {
             return None;
         }
 
@@ -126,6 +181,23 @@ impl App {
         self.screen.flush_blocks();
     }
 
+    pub(super) fn start_btw(
+        &mut self,
+        question: String,
+        display_question: String,
+        image_labels: Vec<String>,
+    ) {
+        self.screen.set_btw(display_question, image_labels);
+        self.engine.send(UiCommand::Btw {
+            question,
+            history: self.history.clone(),
+            model: self.model.clone(),
+            reasoning_effort: self.reasoning_effort,
+            api_base: Some(self.api_base.clone()),
+            api_key: Some(std::env::var(&self.api_key_env).unwrap_or_default()),
+        });
+    }
+
     pub(super) fn toggle_mode(&mut self) {
         self.mode = self.mode.toggle();
         state::set_mode(self.mode);
@@ -163,6 +235,15 @@ impl App {
                 self.screen.flush_blocks();
             }
         }
+    }
+
+    /// Count queued messages that were actually steered into the engine
+    /// (excludes custom commands, which need their own turn).
+    pub(super) fn steered_message_count(&self) -> usize {
+        self.queued_messages
+            .iter()
+            .filter(|m| crate::custom_commands::resolve(m.trim()).is_none())
+            .count()
     }
 
     pub(super) fn format_conversation_text(&self) -> String {

@@ -89,6 +89,9 @@ pub async fn engine_task(
                     UiCommand::GenerateTitle { user_messages } => {
                         spawn_title_generation(&config, &client, &last_model, user_messages, &event_tx);
                     }
+                    UiCommand::Btw { question, history, model, reasoning_effort, api_base, api_key } => {
+                        spawn_btw_request(&config, &client, &model, reasoning_effort, question, history, api_base, api_key, &event_tx);
+                    }
                     _ => {} // Steer, Cancel, etc. only relevant during a turn
                 }
             }
@@ -153,6 +156,61 @@ fn spawn_title_generation(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
+fn spawn_btw_request(
+    config: &EngineConfig,
+    client: &reqwest::Client,
+    model: &str,
+    reasoning_effort: protocol::ReasoningEffort,
+    question: String,
+    history: Vec<protocol::Message>,
+    api_base: Option<String>,
+    api_key: Option<String>,
+    event_tx: &mpsc::UnboundedSender<EngineEvent>,
+) {
+    let provider = build_provider_with_overrides(
+        config,
+        client,
+        api_base.as_deref(),
+        api_key.as_deref(),
+    );
+    let model = model.to_string();
+    let tx = event_tx.clone();
+    tokio::spawn(async move {
+        let cancel = tokio_util::sync::CancellationToken::new();
+
+        let mut messages = Vec::with_capacity(history.len() + 2);
+        messages.push(protocol::Message {
+            role: protocol::Role::System,
+            content: Some(protocol::Content::text(
+                "You are a helpful assistant. The user is asking a quick side question \
+                 while working on something else. Answer concisely and directly. \
+                 You have the conversation history for context.",
+            )),
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+        });
+        messages.extend(history);
+        messages.push(protocol::Message {
+            role: protocol::Role::User,
+            content: Some(protocol::Content::text(&question)),
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+        });
+
+        let content = match provider
+            .chat(&messages, &[], &model, reasoning_effort, &cancel, None)
+            .await
+        {
+            Ok(resp) => resp.content.unwrap_or_default(),
+            Err(e) => format!("error: {e}"),
+        };
+        let _ = tx.send(EngineEvent::BtwResponse { content });
+    });
+}
+
 fn build_provider(config: &EngineConfig, client: &reqwest::Client) -> Provider {
     Provider::new(
         config.api_base.clone(),
@@ -204,6 +262,12 @@ impl<'a> Turn<'a> {
         let _ = self.event_tx.send(event);
     }
 
+    fn apply_model_change(&mut self, model: String, api_base: String, api_key: String) {
+        self.model = model;
+        self.provider = Provider::new(api_base, api_key, self.http_client.clone())
+            .with_model_config(self.config.model_config.clone());
+    }
+
     /// Handle a command that arrived during a turn but isn't turn-specific.
     /// Returns true if the command was handled (caller should not fall through).
     fn handle_background_cmd(&self, cmd: UiCommand) -> bool {
@@ -214,6 +278,20 @@ impl<'a> Turn<'a> {
                     self.http_client,
                     &self.model,
                     user_messages,
+                    self.event_tx,
+                );
+                true
+            }
+            UiCommand::Btw { question, history, model, reasoning_effort, api_base, api_key } => {
+                spawn_btw_request(
+                    self.config,
+                    self.http_client,
+                    &model,
+                    reasoning_effort,
+                    question,
+                    history,
+                    api_base,
+                    api_key,
                     self.event_tx,
                 );
                 true
@@ -504,6 +582,9 @@ impl<'a> Turn<'a> {
                 Ok(UiCommand::SetReasoningEffort { effort }) => {
                     self.reasoning_effort = effort;
                 }
+                Ok(UiCommand::SetModel { model, api_base, api_key }) => {
+                    self.apply_model_change(model, api_base, api_key);
+                }
                 Ok(UiCommand::Cancel) => {
                     self.cancel.cancel();
                 }
@@ -520,41 +601,54 @@ impl<'a> Turn<'a> {
         &mut self,
         tool_defs: &[ToolDefinition],
     ) -> Result<crate::provider::LLMResponse, ProviderError> {
-        let on_retry = |delay: std::time::Duration, attempt: u32| {
-            let _ = self.event_tx.send(EngineEvent::Retrying {
-                delay_ms: delay.as_millis() as u64,
-                attempt,
-            });
+        // The chat future borrows self.provider and self.model, so model
+        // changes received mid-request are deferred until the future resolves.
+        let mut pending_model: Option<(String, String, String)> = None;
+
+        let result = {
+            let on_retry = |delay: std::time::Duration, attempt: u32| {
+                let _ = self.event_tx.send(EngineEvent::Retrying {
+                    delay_ms: delay.as_millis() as u64,
+                    attempt,
+                });
+            };
+            let chat_future = self.provider.chat(
+                &self.messages,
+                tool_defs,
+                &self.model,
+                self.reasoning_effort,
+                &self.cancel,
+                Some(&on_retry),
+            );
+            tokio::pin!(chat_future);
+
+            let mut cancel_received = false;
+            loop {
+                if cancel_received {
+                    break (&mut chat_future).await;
+                }
+                tokio::select! {
+                    result = &mut chat_future => break result,
+                    Some(cmd) = self.cmd_rx.recv() => match cmd {
+                        UiCommand::Cancel => {
+                            self.cancel.cancel();
+                            cancel_received = true;
+                        }
+                        UiCommand::SetMode { mode } => self.mode = mode,
+                        UiCommand::SetReasoningEffort { effort } => self.reasoning_effort = effort,
+                        UiCommand::SetModel { model, api_base, api_key } => {
+                            pending_model = Some((model, api_base, api_key));
+                        }
+                        other => { self.handle_background_cmd(other); }
+                    },
+                }
+            }
         };
 
-        let chat_future = self.provider.chat(
-            &self.messages,
-            tool_defs,
-            &self.model,
-            self.reasoning_effort,
-            &self.cancel,
-            Some(&on_retry),
-        );
-        tokio::pin!(chat_future);
-
-        let mut cancel_received = false;
-        loop {
-            if cancel_received {
-                break (&mut chat_future).await;
-            }
-            tokio::select! {
-                result = &mut chat_future => break result,
-                Some(cmd) = self.cmd_rx.recv() => match cmd {
-                    UiCommand::Cancel => {
-                        self.cancel.cancel();
-                        cancel_received = true;
-                    }
-                    UiCommand::SetMode { mode } => self.mode = mode,
-                    UiCommand::SetReasoningEffort { effort } => self.reasoning_effort = effort,
-                    other => { self.handle_background_cmd(other); }
-                },
-            }
+        if let Some((model, api_base, api_key)) = pending_model {
+            self.apply_model_change(model, api_base, api_key);
         }
+        result
     }
 
     /// Check permission and handle the Ask flow.
@@ -654,6 +748,7 @@ impl<'a> Turn<'a> {
                 }
                 Some(UiCommand::SetMode { mode }) => self.mode = mode,
                 Some(UiCommand::SetReasoningEffort { effort }) => self.reasoning_effort = effort,
+                Some(UiCommand::SetModel { model, api_base, api_key }) => self.apply_model_change(model, api_base, api_key),
                 Some(UiCommand::Cancel) => {
                     self.cancel.cancel();
                     return (false, None);
@@ -676,6 +771,7 @@ impl<'a> Turn<'a> {
                 }) if id == request_id => return answer,
                 Some(UiCommand::SetMode { mode }) => self.mode = mode,
                 Some(UiCommand::SetReasoningEffort { effort }) => self.reasoning_effort = effort,
+                Some(UiCommand::SetModel { model, api_base, api_key }) => self.apply_model_change(model, api_base, api_key),
                 Some(UiCommand::Cancel) => {
                     self.cancel.cancel();
                     return None;

@@ -251,6 +251,9 @@ pub enum EngineEvent {
     /// Response to `UiCommand::GenerateTitle`.
     TitleGenerated { title: String },
 
+    /// Response to `UiCommand::Btw`.
+    BtwResponse { content: String },
+
     /// Snapshot of the engine's message list, sent after each significant step.
     Messages {
         turn_id: u64,
@@ -323,6 +326,13 @@ pub enum UiCommand {
     /// Change reasoning effort while the engine is running.
     SetReasoningEffort { effort: ReasoningEffort },
 
+    /// Change the model/provider while the engine is running.
+    SetModel {
+        model: String,
+        api_base: String,
+        api_key: String,
+    },
+
     /// Compact conversation history.
     Compact {
         keep_turns: usize,
@@ -331,6 +341,16 @@ pub enum UiCommand {
 
     /// Generate a title for the session based on recent user messages.
     GenerateTitle { user_messages: Vec<String> },
+
+    /// Ask an ephemeral side question (no tools, not added to history).
+    Btw {
+        question: String,
+        history: Vec<Message>,
+        model: String,
+        reasoning_effort: ReasoningEffort,
+        api_base: Option<String>,
+        api_key: Option<String>,
+    },
 
     /// Cancel the current turn.
     Cancel,

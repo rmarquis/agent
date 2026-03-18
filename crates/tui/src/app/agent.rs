@@ -341,6 +341,10 @@ impl App {
                 self.save_session();
                 SessionControl::Continue
             }
+            EngineEvent::BtwResponse { content } => {
+                self.screen.set_btw_response(content);
+                SessionControl::Continue
+            }
             EngineEvent::Messages {
                 turn_id: id,
                 messages,
@@ -400,6 +404,9 @@ impl App {
                 self.session.title = Some(title);
                 self.pending_title = false;
                 self.save_session();
+            }
+            EngineEvent::BtwResponse { content } => {
+                self.screen.set_btw_response(content);
             }
             EngineEvent::ProcessCompleted { id, exit_code } => {
                 let msg = match exit_code {

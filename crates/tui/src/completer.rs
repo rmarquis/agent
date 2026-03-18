@@ -67,6 +67,7 @@ impl Completer {
             ("fork", "fork current session"),
             ("stats", "show token usage statistics"),
             ("theme", "change accent color"),
+            ("btw", "ask a side question"),
             ("ps", "manage background processes"),
             ("exit", "exit the app"),
             ("quit", "exit the app"),

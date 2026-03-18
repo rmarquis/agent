@@ -138,7 +138,13 @@ impl App {
                             self.api_base = resolved.api_base.clone();
                             self.api_key_env = resolved.api_key_env.clone();
                             self.screen.set_model_label(resolved.model_name.clone());
-                            state::set_selected_model(key);
+                            state::set_selected_model(key.clone());
+                            self.engine.send(UiCommand::SetModel {
+                                model: resolved.model_name.clone(),
+                                api_base: resolved.api_base.clone(),
+                                api_key: std::env::var(&resolved.api_key_env)
+                                    .unwrap_or_default(),
+                            });
                         }
                         self.screen.erase_prompt();
                     }
@@ -159,7 +165,20 @@ impl App {
             EventOutcome::Submit { content, display } => {
                 let text = content.text_content();
                 let has_images = content.image_count() > 0;
-                if !text.is_empty() || has_images {
+                // Intercept /btw before process_input so we have the
+                // compact display string for the header.
+                if text.trim().starts_with("/btw ") {
+                    let question_full = text.trim()[5..].trim().to_string();
+                    let display_q = display
+                        .strip_prefix("/btw ")
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_else(|| question_full.clone());
+                    if !question_full.is_empty() {
+                        let labels = content.image_labels();
+                        self.input_history.push(text.clone());
+                        self.start_btw(question_full, display_q, labels);
+                    }
+                } else if !text.is_empty() || has_images {
                     self.screen.erase_prompt();
                     let outcome = if has_images && text.trim().is_empty() {
                         // Image-only submission — skip command processing.
@@ -207,6 +226,35 @@ impl App {
                 self.screen.redraw(true);
             }
             return EventOutcome::Noop;
+        }
+
+        // Handle btw block keys: scroll or dismiss.
+        if self.screen.has_btw() {
+            if let Event::Key(KeyEvent { code, modifiers, .. }) = ev {
+                match (code, modifiers) {
+                    (KeyCode::Esc, _)
+                    | (KeyCode::Char('q'), KeyModifiers::NONE)
+                    | (KeyCode::Char('c'), KeyModifiers::CONTROL)
+                    | (KeyCode::Enter, _) => {
+                        self.screen.dismiss_btw();
+                        return EventOutcome::Noop;
+                    }
+                    (KeyCode::Char('d'), KeyModifiers::CONTROL)
+                    | (KeyCode::PageDown, _) => {
+                        self.screen.btw_scroll(10);
+                        return EventOutcome::Noop;
+                    }
+                    (KeyCode::Char('u'), KeyModifiers::CONTROL)
+                    | (KeyCode::PageUp, _) => {
+                        self.screen.btw_scroll(-10);
+                        return EventOutcome::Noop;
+                    }
+                    _ => {
+                        // Ignore other keys while btw is open.
+                        return EventOutcome::Noop;
+                    }
+                }
+            }
         }
 
         // Ctrl+R: open history fuzzy search (not in vim normal mode).
@@ -343,40 +391,6 @@ impl App {
 
         // Delegate to InputState::handle_event
         match self.input.handle_event(ev, Some(&mut self.input_history)) {
-            Action::Submit { ref content, .. } if content.as_text().trim() == "/model" => {
-                let models: Vec<(String, String, String)> = self
-                    .available_models
-                    .iter()
-                    .map(|m| (m.key.clone(), m.model_name.clone(), m.provider_name.clone()))
-                    .collect();
-                if !models.is_empty() {
-                    self.input.open_model_picker(models);
-                    self.screen.mark_dirty();
-                }
-                EventOutcome::Redraw
-            }
-            Action::Submit { ref content, .. } if content.as_text().trim() == "/settings" => {
-                self.input.open_settings(
-                    self.input.vim_enabled(),
-                    self.auto_compact,
-                    self.show_speed,
-                    self.restrict_to_workspace,
-                );
-                self.screen.mark_dirty();
-                EventOutcome::Redraw
-            }
-            Action::Submit { ref content, .. } if content.as_text().trim() == "/theme" => {
-                self.input.open_theme_picker();
-                self.screen.mark_dirty();
-                EventOutcome::Redraw
-            }
-            Action::Submit { ref content, .. } if content.as_text().trim() == "/stats" => {
-                let entries = crate::metrics::load();
-                let lines = crate::metrics::render_stats(&entries);
-                self.input.open_stats(lines);
-                self.screen.mark_dirty();
-                EventOutcome::Redraw
-            }
             Action::Submit { content, display } => {
                 self.input.restore_stash();
                 EventOutcome::Submit { content, display }
@@ -423,6 +437,34 @@ impl App {
             return EventOutcome::Noop;
         }
 
+        // Handle btw block keys: scroll or dismiss.
+        if self.screen.has_btw() {
+            if let Event::Key(KeyEvent { code, modifiers, .. }) = ev {
+                match (code, modifiers) {
+                    (KeyCode::Esc, _)
+                    | (KeyCode::Char('q'), KeyModifiers::NONE)
+                    | (KeyCode::Char('c'), KeyModifiers::CONTROL)
+                    | (KeyCode::Enter, _) => {
+                        self.screen.dismiss_btw();
+                        return EventOutcome::Noop;
+                    }
+                    (KeyCode::Char('d'), KeyModifiers::CONTROL)
+                    | (KeyCode::PageDown, _) => {
+                        self.screen.btw_scroll(10);
+                        return EventOutcome::Noop;
+                    }
+                    (KeyCode::Char('u'), KeyModifiers::CONTROL)
+                    | (KeyCode::PageUp, _) => {
+                        self.screen.btw_scroll(-10);
+                        return EventOutcome::Noop;
+                    }
+                    _ => {
+                        return EventOutcome::Noop;
+                    }
+                }
+            }
+        }
+
         // Track last keypress for deferring permission dialogs.
         if matches!(ev, Event::Key(_)) {
             t.last_keypress = Some(Instant::now());
@@ -452,7 +494,7 @@ impl App {
             if !self.input.buf.is_empty() {
                 t.last_ctrlc = Some(Instant::now());
                 self.input.clear();
-                let count = self.queued_messages.len();
+                let count = self.steered_message_count();
                 if count > 0 {
                     self.engine.send(UiCommand::Unsteer { count });
                 }
@@ -486,7 +528,7 @@ impl App {
                 }
                 EscAction::Unqueue => {
                     // Tell the engine to remove already-steered messages.
-                    let count = self.queued_messages.len();
+                    let count = self.steered_message_count();
                     if count > 0 {
                         self.engine.send(UiCommand::Unsteer { count });
                     }
@@ -514,8 +556,23 @@ impl App {
 
         // Everything else → InputState::handle_event (type-ahead with history).
         match self.input.handle_event(ev, Some(&mut self.input_history)) {
-            Action::Submit { content, .. } => {
+            Action::Submit { content, display } => {
                 let text = content.text_content();
+                // Intercept /btw to use the compact display string.
+                if text.trim().starts_with("/btw ") {
+                    let question_full = text.trim()[5..].trim().to_string();
+                    let display_q = display
+                        .strip_prefix("/btw ")
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_else(|| question_full.clone());
+                    if !question_full.is_empty() {
+                        let labels = content.image_labels();
+                        self.input_history.push(text.clone());
+                        self.start_btw(question_full, display_q, labels);
+                    }
+                    self.screen.mark_dirty();
+                    return EventOutcome::Noop;
+                }
                 if let Some(outcome) = self.try_command_while_running(text.trim()) {
                     return outcome;
                 }
@@ -563,6 +620,9 @@ impl App {
             CommandAction::Continue => {}
         }
         if trimmed.starts_with('/') {
+            if trimmed.starts_with("/btw ") {
+                return InputOutcome::Continue;
+            }
             if let Some(cmd) = crate::custom_commands::resolve(trimmed) {
                 return InputOutcome::CustomCommand(Box::new(cmd));
             }

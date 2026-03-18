@@ -160,8 +160,6 @@ fn is_allowed_while_running(input: &str) -> Result<(), String> {
         "/compact" => Err("cannot compact while agent is working".into()),
         "/resume" => Err("cannot resume while agent is working".into()),
         "/fork" => Err("cannot fork while agent is working".into()),
-        "/settings" => Err("cannot open settings while agent is working".into()),
-        "/model" => Err("cannot switch model while agent is working".into()),
         _ => Ok(()),
     }
 }
@@ -446,7 +444,11 @@ impl App {
             if let Some(ref mut ag) = agent {
                 if self.queued_messages.len() > ag.steered_count {
                     for msg in &self.queued_messages[ag.steered_count..] {
-                        self.engine.send(UiCommand::Steer { text: msg.clone() });
+                        // Custom commands need their own turn — don't steer them
+                        // into the current one.
+                        if crate::custom_commands::resolve(msg.trim()).is_none() {
+                            self.engine.send(UiCommand::Steer { text: msg.clone() });
+                        }
                     }
                     ag.steered_count = self.queued_messages.len();
                 }
@@ -454,30 +456,60 @@ impl App {
 
             // ── Auto-start from leftover queued messages ─────────────────
             if agent.is_none() && !self.queued_messages.is_empty() {
-                let text = std::mem::take(&mut self.queued_messages).join("\n");
-                if !text.is_empty() {
-                    self.screen.erase_prompt();
-                    match self.process_input(&text) {
-                        InputOutcome::StartAgent => {
+                let items = std::mem::take(&mut self.queued_messages);
+
+                // Find the first custom command in the queue.
+                let cmd_idx = items
+                    .iter()
+                    .position(|m| crate::custom_commands::resolve(m.trim()).is_some());
+
+                match cmd_idx {
+                    // First item is a custom command — start it, keep the rest.
+                    Some(0) => {
+                        let cmd = crate::custom_commands::resolve(items[0].trim()).unwrap();
+                        self.screen.erase_prompt();
+                        agent = Some(self.begin_custom_command_turn(cmd));
+                        self.queued_messages = items[1..].to_vec();
+                    }
+                    // Regular messages before a custom command — process them,
+                    // keep the command (and everything after) for next round.
+                    Some(idx) => {
+                        let text = items[..idx].join("\n");
+                        self.queued_messages = items[idx..].to_vec();
+                        if !text.is_empty() {
+                            self.screen.erase_prompt();
                             let content = Content::text(text.clone());
                             agent = Some(self.begin_agent_turn(&text, content));
                         }
-                        InputOutcome::Compact => {
-                            if self.history.is_empty() {
-                                self.screen.push(Block::Error {
-                                    message: "nothing to compact".into(),
-                                });
-                                self.screen.flush_blocks();
-                            } else {
-                                self.compact_history();
+                    }
+                    // No custom commands — original behavior.
+                    None => {
+                        let text = items.join("\n");
+                        if !text.is_empty() {
+                            self.screen.erase_prompt();
+                            match self.process_input(&text) {
+                                InputOutcome::StartAgent => {
+                                    let content = Content::text(text.clone());
+                                    agent = Some(self.begin_agent_turn(&text, content));
+                                }
+                                InputOutcome::Compact => {
+                                    if self.history.is_empty() {
+                                        self.screen.push(Block::Error {
+                                            message: "nothing to compact".into(),
+                                        });
+                                        self.screen.flush_blocks();
+                                    } else {
+                                        self.compact_history();
+                                    }
+                                }
+                                InputOutcome::CustomCommand(cmd) => {
+                                    agent = Some(self.begin_custom_command_turn(*cmd));
+                                }
+                                InputOutcome::Continue | InputOutcome::Quit => {}
+                                InputOutcome::OpenDialog(dlg) => {
+                                    active_dialog = Some(dlg);
+                                }
                             }
-                        }
-                        InputOutcome::CustomCommand(cmd) => {
-                            agent = Some(self.begin_custom_command_turn(*cmd));
-                        }
-                        InputOutcome::Continue | InputOutcome::Quit => {}
-                        InputOutcome::OpenDialog(dlg) => {
-                            active_dialog = Some(dlg);
                         }
                     }
                 }
@@ -609,6 +641,10 @@ impl App {
                     // Mark dialog dirty so elapsed timers update live (e.g. PsDialog).
                     if let Some(d) = active_dialog.as_mut() {
                         d.mark_dirty();
+                    }
+                    // Animate btw "thinking..." dots.
+                    if self.screen.has_btw() {
+                        self.screen.mark_dirty();
                     }
                 }
             }
@@ -763,6 +799,10 @@ mod tests {
         assert!(is_allowed_while_running("/exit").is_ok());
         assert!(is_allowed_while_running("/quit").is_ok());
         assert!(is_allowed_while_running("/clear").is_ok());
+        assert!(is_allowed_while_running("/model").is_ok());
+        assert!(is_allowed_while_running("/settings").is_ok());
+        assert!(is_allowed_while_running("/theme").is_ok());
+        assert!(is_allowed_while_running("/stats").is_ok());
         assert!(is_allowed_while_running("!ls").is_ok());
     }
 
@@ -770,8 +810,6 @@ mod tests {
     fn running_blocked_commands() {
         assert!(is_allowed_while_running("/compact").is_err());
         assert!(is_allowed_while_running("/resume").is_err());
-        assert!(is_allowed_while_running("/settings").is_err());
-        assert!(is_allowed_while_running("/model").is_err());
     }
 
     // ── classify_startup_command ──────────────────────────────────────
