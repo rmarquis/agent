@@ -89,8 +89,8 @@ pub async fn engine_task(
                             }
                         }
                     }
-                    UiCommand::GenerateTitle { user_messages } => {
-                        spawn_title_generation(&config, &client, &last_model, user_messages, &event_tx);
+                    UiCommand::GenerateTitle { user_messages, model } => {
+                        spawn_title_generation(&config, &client, &model, user_messages, &event_tx);
                     }
                     UiCommand::Btw { question, history, model, reasoning_effort, api_base, api_key } => {
                         spawn_btw_request(&config, &client, &model, reasoning_effort, question, history, api_base, api_key, &event_tx);
@@ -357,11 +357,11 @@ impl<'a> Turn<'a> {
     /// Returns true if the command was handled (caller should not fall through).
     fn handle_background_cmd(&self, cmd: UiCommand) -> bool {
         match cmd {
-            UiCommand::GenerateTitle { user_messages } => {
+            UiCommand::GenerateTitle { user_messages, model } => {
                 spawn_title_generation(
                     self.config,
                     self.http_client,
-                    &self.model,
+                    &model,
                     user_messages,
                     self.event_tx,
                 );

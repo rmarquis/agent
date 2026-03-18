@@ -402,6 +402,20 @@ impl App {
                 EventOutcome::Noop
             }
             Action::Redraw => {
+                // Live-preview settings toggles.
+                if let Some(ref ms) = self.input.menu {
+                    if let MenuKind::Settings {
+                        show_speed,
+                        show_slug,
+                        ..
+                    } = ms.kind
+                    {
+                        self.show_speed = show_speed;
+                        self.screen.set_show_speed(show_speed);
+                        self.show_slug = show_slug;
+                        self.screen.set_show_slug(show_slug);
+                    }
+                }
                 self.screen.mark_dirty();
                 EventOutcome::Redraw
             }

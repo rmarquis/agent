@@ -311,6 +311,7 @@ impl App {
         self.pending_title = true;
         self.engine.send(UiCommand::GenerateTitle {
             user_messages: recent,
+            model: self.model.clone(),
         });
     }
 
