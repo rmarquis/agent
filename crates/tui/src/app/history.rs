@@ -59,6 +59,9 @@ impl App {
         }
 
         self.session = loaded;
+        if let Some(ref slug) = self.session.slug {
+            self.screen.set_task_label(slug.clone());
+        }
         self.history = self.session.messages.clone();
         self.auto_approved.clear();
         self.queued_messages.clear();
