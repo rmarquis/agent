@@ -19,7 +19,7 @@ impl App {
 
         self.engine.send(UiCommand::StartTurn {
             turn_id,
-            input: text.clone(),
+            content,
             mode: self.mode,
             model: self.model.clone(),
             reasoning_effort: self.reasoning_effort,
@@ -147,7 +147,7 @@ impl App {
 
         self.engine.send(UiCommand::StartTurn {
             turn_id,
-            input: evaluated,
+            content: Content::text(evaluated),
             mode: self.mode,
             model,
             reasoning_effort: reasoning,
@@ -634,6 +634,11 @@ impl App {
                 self.screen.finish_tool(ToolStatus::Denied, None);
                 if has_message {
                     // Deny with feedback — let the agent continue with the message.
+                    // Clear pending so the engine's ToolFinished event doesn't
+                    // overwrite the Denied status.
+                    if let Some(ref mut ag) = agent {
+                        ag.pending = None;
+                    }
                     false
                 } else {
                     // Deny without message — stop the agent.

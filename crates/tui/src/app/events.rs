@@ -437,6 +437,10 @@ impl App {
                 self.screen.mark_dirty();
                 EventOutcome::Redraw
             }
+            Action::NotifyError(msg) => {
+                self.screen.notify_error(msg);
+                EventOutcome::Redraw
+            }
             Action::Noop => EventOutcome::Noop,
         }
     }
@@ -572,6 +576,10 @@ impl App {
             }
             Action::CycleReasoning => {
                 self.set_reasoning_effort(self.reasoning_effort.cycle());
+            }
+            Action::NotifyError(msg) => {
+                self.screen.notify_error(msg);
+                self.screen.mark_dirty();
             }
             Action::MenuResult(_) | Action::Noop | Action::Resize { .. } => {}
         }

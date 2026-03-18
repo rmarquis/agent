@@ -697,7 +697,7 @@ impl App {
 
         self.engine.send(UiCommand::StartTurn {
             turn_id,
-            input: message,
+            content: Content::text(message),
             mode: self.mode,
             model: self.model.clone(),
             reasoning_effort: self.reasoning_effort,

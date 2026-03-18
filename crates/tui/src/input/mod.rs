@@ -84,6 +84,7 @@ pub enum Action {
     ToggleMode,
     CycleReasoning,
     Resize { width: usize, height: usize },
+    NotifyError(String),
     Noop,
 }
 
@@ -508,11 +509,18 @@ impl InputState {
                 }
                 // Try to detect an image file path (drag-and-drop).
                 if let Some(path) = engine::image::normalize_pasted_path(&data) {
-                    if engine::image::is_image_file(&path) && std::path::Path::new(&path).exists() {
-                        let label = engine::image::image_label_from_path(&path);
-                        if let Ok(url) = engine::image::read_image_as_data_url(&path) {
-                            self.insert_image(label, url);
-                            return Action::Redraw;
+                    if engine::image::is_image_file(&path) {
+                        match engine::image::read_image_as_data_url(&path) {
+                            Ok(url) => {
+                                let label = engine::image::image_label_from_path(&path);
+                                self.insert_image(label, url);
+                                return Action::Redraw;
+                            }
+                            Err(e) => {
+                                return Action::NotifyError(
+                                    format!("cannot read image: {e}"),
+                                );
+                            }
                         }
                     }
                 }

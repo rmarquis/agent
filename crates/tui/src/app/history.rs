@@ -199,9 +199,20 @@ impl App {
                                 });
                             }
                         } else {
+                            let image_labels = content.image_labels();
+                            let display_text = if image_labels.is_empty() {
+                                text
+                            } else {
+                                let suffix = image_labels.join(" ");
+                                if text.is_empty() {
+                                    suffix
+                                } else {
+                                    format!("{text} {suffix}")
+                                }
+                            };
                             self.screen.push(Block::User {
-                                text,
-                                image_labels: vec![],
+                                text: display_text,
+                                image_labels,
                             });
                         }
                     }

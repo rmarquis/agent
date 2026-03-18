@@ -38,7 +38,7 @@ pub async fn engine_task(
         tokio::select! {
             Some(cmd) = cmd_rx.recv() => {
                 match cmd {
-                    UiCommand::StartTurn { turn_id, input, mode, model, reasoning_effort, history, api_base, api_key, session_id, model_config_overrides, permission_overrides } => {
+                    UiCommand::StartTurn { turn_id, content: input_content, mode, model, reasoning_effort, history, api_base, api_key, session_id, model_config_overrides, permission_overrides } => {
                         predict_cancel.cancel();
                         let mut provider = build_provider_with_overrides(
                             &config, &client,
@@ -73,7 +73,7 @@ pub async fn engine_task(
                             system_prompt: &config.system_prompt,
                             session_id,
                         };
-                        turn.run(input, history).await;
+                        turn.run(input_content, history).await;
                     }
                     UiCommand::Compact { keep_turns, history, model, focus } => {
                         let provider = build_provider(&config, &client);
@@ -414,7 +414,7 @@ impl<'a> Turn<'a> {
     }
 
     /// Main agentic loop for a single turn.
-    async fn run(&mut self, input: String, history: Vec<Message>) {
+    async fn run(&mut self, content: Content, history: Vec<Message>) {
         self.messages = Vec::with_capacity(history.len() + 2);
         self.messages.push(Message {
             role: Role::System,
@@ -426,10 +426,10 @@ impl<'a> Turn<'a> {
         });
         self.messages.extend(history);
 
-        if !input.is_empty() {
+        if !content.is_empty() {
             self.messages.push(Message {
                 role: Role::User,
-                content: Some(Content::text(input)),
+                content: Some(content),
                 reasoning_content: None,
                 tool_calls: None,
                 tool_call_id: None,

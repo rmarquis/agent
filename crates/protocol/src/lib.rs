@@ -285,7 +285,7 @@ pub enum UiCommand {
     /// Start a new agent turn.
     StartTurn {
         turn_id: u64,
-        input: String,
+        content: Content,
         mode: Mode,
         model: String,
         reasoning_effort: ReasoningEffort,
