@@ -862,6 +862,36 @@ pub(super) fn print_user_highlights(
     flush(out, &mut plain);
 }
 
+// ── Active exec rendering ────────────────────────────────────────────────────
+
+pub(super) fn render_active_exec(out: &mut RenderOut, exec: &ActiveExec, width: usize) -> u16 {
+    let char_len = exec.command.chars().count() + 1;
+    let pad_width = (char_len + 2).min(width);
+    let trailing = pad_width.saturating_sub(char_len + 1);
+
+    let elapsed = exec.start_time.elapsed();
+    let time_str = format!(" {}", format_duration(elapsed.as_secs()));
+
+    let _ = out.queue(SetBackgroundColor(theme::USER_BG));
+    let _ = out.queue(SetForegroundColor(theme::EXEC));
+    let _ = out.queue(SetAttribute(Attribute::Bold));
+    let _ = out.queue(Print(" !"));
+    let _ = out.queue(SetForegroundColor(Color::Reset));
+    let _ = out.queue(Print(format!("{}{}", exec.command, " ".repeat(trailing))));
+    let _ = out.queue(SetAttribute(Attribute::Reset));
+    let _ = out.queue(ResetColor);
+    let _ = out.queue(SetAttribute(Attribute::Dim));
+    let _ = out.queue(Print(&time_str));
+    let _ = out.queue(SetAttribute(Attribute::Reset));
+    crlf(out);
+    let mut rows = 1u16;
+
+    if !exec.output.is_empty() {
+        rows += render_bash_output(out, &exec.output, false, width);
+    }
+    rows
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1262,37 +1292,4 @@ mod tests {
             "empty thinking adds 1 extra gap row before text content"
         );
     }
-}
-
-// ── Active exec rendering ────────────────────────────────────────────────────
-
-pub(super) fn render_active_exec(out: &mut RenderOut, exec: &ActiveExec, width: usize) -> u16 {
-    // Header: styled like Block::Exec
-    let char_len = exec.command.chars().count() + 1; // +1 for "!"
-    let pad_width = (char_len + 2).min(width);
-    let trailing = pad_width.saturating_sub(char_len + 1);
-
-    let elapsed = exec.start_time.elapsed();
-    let time_str = format!(" {}", format_duration(elapsed.as_secs()));
-
-    let _ = out.queue(SetBackgroundColor(theme::USER_BG));
-    let _ = out.queue(SetForegroundColor(theme::EXEC));
-    let _ = out.queue(SetAttribute(Attribute::Bold));
-    let _ = out.queue(Print(" !"));
-    let _ = out.queue(SetForegroundColor(Color::Reset));
-    let _ = out.queue(Print(format!("{}{}", exec.command, " ".repeat(trailing))));
-    let _ = out.queue(SetAttribute(Attribute::Reset));
-    let _ = out.queue(ResetColor);
-    // Elapsed time
-    let _ = out.queue(SetAttribute(Attribute::Dim));
-    let _ = out.queue(Print(&time_str));
-    let _ = out.queue(SetAttribute(Attribute::Reset));
-    crlf(out);
-    let mut rows = 1u16;
-
-    // Output: reuse the bash tail-trimming renderer
-    if !exec.output.is_empty() {
-        rows += render_bash_output(out, &exec.output, false, width);
-    }
-    rows
 }

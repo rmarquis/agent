@@ -8,5 +8,5 @@ cargo build
 cargo test --workspace
 
 # format and lint
-cargo fmt && cargo clippy
+cargo fmt && cargo clippy --workspace --all-targets -- -D warnings
 ```
