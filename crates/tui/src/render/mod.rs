@@ -12,7 +12,8 @@ pub use dialogs::{
     QuestionDialog, QuestionOption, ResumeDialog, RewindDialog,
 };
 
-use crate::input::{Attachment, InputSnapshot, InputState, MenuKind, ATTACHMENT_MARKER};
+use crate::attachment::{AttachmentId, AttachmentStore};
+use crate::input::{InputSnapshot, InputState, MenuKind, ATTACHMENT_MARKER};
 use crate::theme;
 use crate::utils::format_duration;
 use crossterm::{
@@ -35,6 +36,7 @@ pub struct FramePrompt<'a> {
     pub mode: protocol::Mode,
     pub queued: &'a [String],
     pub prediction: Option<&'a str>,
+    pub store: &'a AttachmentStore,
 }
 
 /// Output wrapper that selects the line-advance strategy.
@@ -1041,7 +1043,13 @@ impl Screen {
         self.redraw(true);
     }
 
-    pub fn draw_prompt(&mut self, state: &InputState, mode: protocol::Mode, width: usize) {
+    pub fn draw_prompt(
+        &mut self,
+        state: &InputState,
+        mode: protocol::Mode,
+        width: usize,
+        store: &AttachmentStore,
+    ) {
         self.draw_frame(
             width,
             Some(FramePrompt {
@@ -1049,6 +1057,7 @@ impl Screen {
                 mode,
                 queued: &[],
                 prediction: None,
+                store,
             }),
         );
     }
@@ -1162,6 +1171,7 @@ impl Screen {
                 self.prompt.prev_rows.saturating_sub(pre_prompt),
                 draw_start_row,
                 pre_prompt,
+                p.store,
             );
             if scrolled {
                 self.has_scrollback = true;
@@ -1248,6 +1258,7 @@ impl Screen {
         prev_rows: u16,
         draw_start_row: u16,
         pre_prompt_rows: u16,
+        store: &AttachmentStore,
     ) -> (u16, u16, bool) {
         let usable = width.saturating_sub(2);
         let height = terminal::size()
@@ -1256,7 +1267,7 @@ impl Screen {
             .saturating_sub(pre_prompt_rows as usize);
         let stash_rows = if state.stash.is_some() { 1 } else { 0 };
 
-        let mut extra_rows = render_stash(out, &state.stash, usable);
+        let mut extra_rows = render_stash(out, &state.stash, usable, store);
         let queued_visual = render_queued(out, queued, usable);
         extra_rows += queued_visual;
         let queued_rows = queued_visual as usize;
@@ -1284,33 +1295,38 @@ impl Screen {
 
         if self.show_slug {
             if let Some(ref label) = self.task_label {
-                let is_compacting =
-                    self.working.throbber == Some(Throbber::Compacting);
+                let is_compacting = self.working.throbber == Some(Throbber::Compacting);
                 let slug_text = if let Some(spinner) = self.working.spinner_char() {
                     if !throbber_spans.is_empty() {
                         throbber_spans.remove(0);
                     }
                     // Keep "compacting" visible after the tag.
                     if is_compacting {
-                        throbber_spans.insert(0, BarSpan {
-                            text: " compacting".into(),
-                            color: Color::Reset,
-                            bg: None,
-                            attr: Some(crossterm::style::Attribute::Bold),
-                            priority: 0,
-                        });
+                        throbber_spans.insert(
+                            0,
+                            BarSpan {
+                                text: " compacting".into(),
+                                color: Color::Reset,
+                                bg: None,
+                                attr: Some(crossterm::style::Attribute::Bold),
+                                priority: 0,
+                            },
+                        );
                     }
                     format!(" {} {} ", spinner, label)
                 } else {
                     format!(" {} ", label)
                 };
-                throbber_spans.insert(0, BarSpan {
-                    text: slug_text,
-                    color: Color::Black,
-                    bg: Some(theme::slug_color()),
-                    attr: None,
-                    priority: 1,
-                });
+                throbber_spans.insert(
+                    0,
+                    BarSpan {
+                        text: slug_text,
+                        color: Color::Black,
+                        bg: Some(theme::slug_color()),
+                        attr: None,
+                        priority: 1,
+                    },
+                );
             }
         }
 
@@ -1408,7 +1424,7 @@ impl Screen {
         );
         let _ = out.queue(Print("\r\n"));
 
-        let spans = build_display_spans(&state.buf, &state.attachments);
+        let spans = build_display_spans(&state.buf, &state.attachment_ids, store);
         let display_buf = spans_to_string(&spans);
         let char_kinds = build_char_kinds(&spans);
         let display_cursor = map_cursor(state.cursor_char(), &state.buf, &spans);
@@ -1666,11 +1682,17 @@ impl Screen {
     }
 }
 
-fn render_stash(out: &mut RenderOut, stash: &Option<InputSnapshot>, usable: usize) -> u16 {
+fn render_stash(
+    out: &mut RenderOut,
+    stash: &Option<InputSnapshot>,
+    usable: usize,
+    store: &AttachmentStore,
+) -> u16 {
     let Some(ref snap) = stash else {
         return 0;
     };
-    let full_display = spans_to_string(&build_display_spans(&snap.buf, &snap.attachments));
+    let full_display =
+        spans_to_string(&build_display_spans(&snap.buf, &snap.attachment_ids, store));
     let first_line = full_display.lines().next().unwrap_or("");
     let line_count = full_display.lines().count();
     let max_chars = usable.saturating_sub(2);
@@ -2224,7 +2246,7 @@ pub(super) fn try_at_ref(chars: &[char], i: usize) -> Option<(String, usize)> {
     }
 }
 
-fn build_display_spans(buf: &str, attachments: &[Attachment]) -> Vec<Span> {
+fn build_display_spans(buf: &str, att_ids: &[AttachmentId], store: &AttachmentStore) -> Vec<Span> {
     let mut spans = Vec::new();
     let mut plain = String::new();
     let mut att_idx = 0;
@@ -2236,9 +2258,9 @@ fn build_display_spans(buf: &str, attachments: &[Attachment]) -> Vec<Span> {
             if !plain.is_empty() {
                 spans.push(Span::Plain(std::mem::take(&mut plain)));
             }
-            let label = attachments
+            let label = att_ids
                 .get(att_idx)
-                .map(|a| a.display_label())
+                .map(|&id| store.display_label(id))
                 .unwrap_or_else(|| "[?]".into());
             spans.push(Span::Attachment(label));
             att_idx += 1;

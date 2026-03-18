@@ -514,7 +514,8 @@ impl App {
                         *agent = None;
                     }
                     if let Some((text, images)) = self.rewind_to(idx) {
-                        self.input.restore_from_rewind(text, images);
+                        self.input
+                            .restore_from_rewind(text, images, &mut self.attachments);
                     }
                     // rewind_to → redraw(true) already purged the screen;
                     // drain stale engine events and save the truncated state.
@@ -564,7 +565,9 @@ impl App {
         let label = match &choice {
             ConfirmChoice::Yes => "approved",
             ConfirmChoice::Always => "always",
-            ConfirmChoice::AlwaysPatterns(ref pats) => pats.first().map(|s| s.as_str()).unwrap_or("pattern"),
+            ConfirmChoice::AlwaysPatterns(ref pats) => {
+                pats.first().map(|s| s.as_str()).unwrap_or("pattern")
+            }
             ConfirmChoice::AlwaysDir(dir) => dir.as_str(),
             ConfirmChoice::No => "denied",
         };
@@ -722,8 +725,7 @@ impl App {
                 // individually against the stored patterns.
                 if let Some(patterns) = self.auto_approved.get(&req.tool_name) {
                     if patterns.is_empty() || {
-                        let subcmds =
-                            engine::permissions::split_shell_commands(&req.desc);
+                        let subcmds = engine::permissions::split_shell_commands(&req.desc);
                         !subcmds.is_empty()
                             && subcmds
                                 .iter()

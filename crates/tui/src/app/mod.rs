@@ -3,6 +3,7 @@ mod commands;
 mod events;
 mod history;
 
+use crate::attachment::AttachmentStore;
 use crate::input::{
     resolve_agent_esc, Action, EscAction, History, InputState, MenuKind, MenuResult,
 };
@@ -41,6 +42,7 @@ pub struct App {
     pub history: Vec<Message>,
     pub input_history: History,
     pub input: InputState,
+    pub attachments: AttachmentStore,
     pub queued_messages: Vec<String>,
     pub auto_approved: HashMap<String, Vec<glob::Pattern>>,
     /// Directories outside the workspace that have appeared in confirm dialogs.
@@ -300,6 +302,7 @@ impl App {
             history: Vec::new(),
             input_history: History::load(),
             input,
+            attachments: AttachmentStore::new(),
             queued_messages: Vec::new(),
             auto_approved: HashMap::new(),
             seen_outside_dirs: HashSet::new(),
@@ -347,8 +350,12 @@ impl App {
             }
             self.screen.flush_blocks();
         }
-        self.screen
-            .draw_prompt(&self.input, self.mode, render::term_width());
+        self.screen.draw_prompt(
+            &self.input,
+            self.mode,
+            render::term_width(),
+            &self.attachments,
+        );
 
         let mut term_events = EventStream::new();
         let mut agent: Option<TurnState> = None;

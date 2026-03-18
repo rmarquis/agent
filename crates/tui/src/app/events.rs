@@ -337,9 +337,7 @@ impl App {
                     let restore_mode = t.esc_vim_mode.take();
 
                     // Cancel in-flight compaction instead of opening rewind.
-                    if self.screen.working_throbber()
-                        == Some(render::Throbber::Compacting)
-                    {
+                    if self.screen.working_throbber() == Some(render::Throbber::Compacting) {
                         self.compact_epoch += 1;
                         self.screen.set_throbber(render::Throbber::Done);
                         self.screen.notify("compaction cancelled".into());
@@ -396,7 +394,10 @@ impl App {
         }
 
         // Delegate to InputState::handle_event
-        match self.input.handle_event(ev, Some(&mut self.input_history)) {
+        match self
+            .input
+            .handle_event(ev, Some(&mut self.input_history), &mut self.attachments)
+        {
             Action::Submit { content, display } => EventOutcome::Submit { content, display },
             Action::MenuResult(result) => EventOutcome::MenuResult(result),
             Action::ToggleMode => {
@@ -520,7 +521,7 @@ impl App {
                 &mut t.esc_vim_mode,
             ) {
                 EscAction::VimToNormal => {
-                    self.input.handle_event(ev, None);
+                    self.input.handle_event(ev, None, &mut self.attachments);
                     self.screen.mark_dirty();
                 }
                 EscAction::Unqueue => {
@@ -552,7 +553,10 @@ impl App {
         }
 
         // Everything else → InputState::handle_event (type-ahead with history).
-        match self.input.handle_event(ev, Some(&mut self.input_history)) {
+        match self
+            .input
+            .handle_event(ev, Some(&mut self.input_history), &mut self.attachments)
+        {
             Action::Submit { content, display } => {
                 if self.try_btw_submit(&content, &display) {
                     self.screen.mark_dirty();
@@ -701,6 +705,7 @@ impl App {
                     mode: self.mode,
                     queued: &self.queued_messages,
                     prediction: None,
+                    store: &self.attachments,
                 }),
             );
         } else {
@@ -711,6 +716,7 @@ impl App {
                     mode: self.mode,
                     queued: &[],
                     prediction: self.input_prediction.as_deref(),
+                    store: &self.attachments,
                 }),
             );
         }

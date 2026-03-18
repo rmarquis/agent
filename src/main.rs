@@ -178,7 +178,7 @@ async fn main() {
             }
             let session_id = if let Ok(guard) = shared.lock() {
                 if let Some(ref s) = *guard {
-                    tui::session::save(s);
+                    tui::session::save(s, &tui::attachment::AttachmentStore::new());
                     if !s.messages.is_empty() {
                         Some(s.id.clone())
                     } else {

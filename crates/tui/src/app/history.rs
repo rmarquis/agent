@@ -37,6 +37,7 @@ impl App {
         self.queued_messages.clear();
         self.screen.clear();
         self.input.clear();
+        self.attachments.clear();
         self.engine.processes.clear();
         self.session = session::Session::new();
         self.pending_title = false;
@@ -81,6 +82,7 @@ impl App {
         self.auto_approved.clear();
         self.queued_messages.clear();
         self.input.clear();
+        self.attachments.clear();
         self.pending_title = false;
         self.engine.processes.clear();
         self.compact_epoch += 1;
@@ -282,7 +284,7 @@ impl App {
         self.session.mode = Some(self.mode.as_str().to_string());
         self.session.reasoning_effort = Some(self.reasoning_effort);
         self.session.model = Some(self.model.clone());
-        session::save(&self.session);
+        session::save(&self.session, &self.attachments);
         if let Ok(mut guard) = self.shared_session.lock() {
             *guard = Some(self.session.clone());
         }
@@ -397,10 +399,7 @@ impl App {
         }
     }
 
-    pub fn rewind_to(
-        &mut self,
-        block_idx: usize,
-    ) -> Option<(String, Vec<crate::input::Attachment>)> {
+    pub fn rewind_to(&mut self, block_idx: usize) -> Option<(String, Vec<(String, String)>)> {
         let turns = self.screen.user_turns();
         let turn_text = turns
             .iter()
@@ -421,28 +420,22 @@ impl App {
             hist_idx = i + 1;
         }
 
-        // Extract image attachments from the target message before truncating.
-        let images = self
+        // Extract image (label, data_url) pairs from the target message before truncating.
+        let images: Vec<(String, String)> = self
             .history
             .get(hist_idx)
             .and_then(|msg| msg.content.as_ref())
-            .map(|content| {
-                use crate::input::Attachment;
-                match content {
-                    Content::Parts(parts) => parts
-                        .iter()
-                        .filter_map(|p| match p {
-                            protocol::ContentPart::ImageUrl { url, label } => {
-                                Some(Attachment::Image {
-                                    label: label.clone().unwrap_or_else(|| "image".into()),
-                                    data_url: url.clone(),
-                                })
-                            }
-                            _ => None,
-                        })
-                        .collect(),
-                    _ => Vec::new(),
-                }
+            .map(|content| match content {
+                Content::Parts(parts) => parts
+                    .iter()
+                    .filter_map(|p| match p {
+                        protocol::ContentPart::ImageUrl { url, label } => {
+                            Some((label.clone().unwrap_or_else(|| "image".into()), url.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
             })
             .unwrap_or_default();
 

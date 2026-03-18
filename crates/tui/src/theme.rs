@@ -39,7 +39,10 @@ pub fn slug_color_value() -> u8 {
 
 /// Look up a preset by name. Returns the ansi value if found.
 pub fn preset_by_name(name: &str) -> Option<u8> {
-    PRESETS.iter().find(|(n, _, _)| *n == name).map(|(_, _, v)| *v)
+    PRESETS
+        .iter()
+        .find(|(n, _, _)| *n == name)
+        .map(|(_, _, v)| *v)
 }
 
 pub const TOOL_PENDING: Color = Color::DarkGrey;

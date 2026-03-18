@@ -1,4 +1,4 @@
-use crate::input::Attachment;
+use crate::attachment::AttachmentId;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 // ── Public types ────────────────────────────────────────────────────────────
@@ -80,7 +80,7 @@ enum SubState {
 struct UndoEntry {
     buf: String,
     cpos: usize,
-    attachments: Vec<Attachment>,
+    attachments: Vec<AttachmentId>,
 }
 
 // ── Vim state ───────────────────────────────────────────────────────────────
@@ -139,7 +139,7 @@ impl Vim {
         key: KeyEvent,
         buf: &mut String,
         cpos: &mut usize,
-        attachments: &mut Vec<Attachment>,
+        attachments: &mut Vec<AttachmentId>,
     ) -> Action {
         match self.mode {
             ViMode::Insert => self.handle_insert(key, buf, cpos, attachments),
@@ -154,7 +154,7 @@ impl Vim {
         key: KeyEvent,
         buf: &mut String,
         cpos: &mut usize,
-        attachments: &mut [Attachment],
+        attachments: &mut [AttachmentId],
     ) -> Action {
         match key {
             // Esc or Ctrl+[ → normal mode
@@ -211,7 +211,7 @@ impl Vim {
         key: KeyEvent,
         buf: &mut String,
         cpos: &mut usize,
-        attachments: &mut Vec<Attachment>,
+        attachments: &mut Vec<AttachmentId>,
     ) -> Action {
         // Ctrl+C / Ctrl+D always pass through for cancel.
         if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -320,7 +320,7 @@ impl Vim {
         c: char,
         buf: &mut String,
         cpos: &mut usize,
-        attachments: &mut Vec<Attachment>,
+        attachments: &mut Vec<AttachmentId>,
     ) -> Action {
         // Count digit accumulation.
         if c.is_ascii_digit() && (c != '0' || self.count1.is_some()) {
@@ -755,7 +755,7 @@ impl Vim {
         key: KeyEvent,
         buf: &mut String,
         cpos: &mut usize,
-        attachments: &mut [Attachment],
+        attachments: &mut [AttachmentId],
     ) -> Action {
         self.sub = SubState::Ready;
         if let KeyCode::Char(c) = key.code {
@@ -814,7 +814,7 @@ impl Vim {
         kind: FindKind,
         buf: &mut String,
         cpos: &mut usize,
-        attachments: &mut [Attachment],
+        attachments: &mut [AttachmentId],
     ) -> Action {
         self.sub = SubState::Ready;
         if let KeyCode::Char(ch) = key.code {
@@ -894,7 +894,7 @@ impl Vim {
         op: Op,
         buf: &mut String,
         cpos: &mut usize,
-        attachments: &mut [Attachment],
+        attachments: &mut [AttachmentId],
     ) -> Action {
         self.sub = SubState::Ready;
         if let KeyCode::Char('g') = key.code {
@@ -945,7 +945,7 @@ impl Vim {
         inner: bool,
         buf: &mut String,
         cpos: &mut usize,
-        attachments: &mut [Attachment],
+        attachments: &mut [AttachmentId],
     ) -> Action {
         self.sub = SubState::Ready;
         if let KeyCode::Char(c) = key.code {
@@ -989,7 +989,7 @@ impl Vim {
         op: Op,
         buf: &mut String,
         cpos: &mut usize,
-        attachments: &mut [Attachment],
+        attachments: &mut [AttachmentId],
     ) -> Action {
         let n = self.effective_count();
         let origin = *cpos;
@@ -1127,7 +1127,7 @@ impl Vim {
         op: Op,
         buf: &mut String,
         cpos: &mut usize,
-        attachments: &mut [Attachment],
+        attachments: &mut [AttachmentId],
     ) -> Action {
         let n = self.effective_count();
         self.reset_counts();
@@ -1205,7 +1205,7 @@ impl Vim {
     // ── Undo/redo ───────────────────────────────────────────────────────
 
     /// Save the current state for undo. Call this before making changes to buf/attachments.
-    pub fn save_undo(&mut self, buf: &str, cpos: usize, att: &[Attachment]) {
+    pub fn save_undo(&mut self, buf: &str, cpos: usize, att: &[AttachmentId]) {
         self.redo_stack.clear();
         self.undo_stack.push(UndoEntry {
             buf: buf.to_string(),
@@ -1215,7 +1215,7 @@ impl Vim {
     }
 
     /// Undo to the previous state.
-    pub fn undo(&mut self, buf: &mut String, cpos: &mut usize, att: &mut Vec<Attachment>) {
+    pub fn undo(&mut self, buf: &mut String, cpos: &mut usize, att: &mut Vec<AttachmentId>) {
         if let Some(entry) = self.undo_stack.pop() {
             self.redo_stack.push(UndoEntry {
                 buf: buf.clone(),
@@ -1230,7 +1230,7 @@ impl Vim {
     }
 
     /// Redo to the next state.
-    pub fn redo(&mut self, buf: &mut String, cpos: &mut usize, att: &mut Vec<Attachment>) {
+    pub fn redo(&mut self, buf: &mut String, cpos: &mut usize, att: &mut Vec<AttachmentId>) {
         if let Some(entry) = self.redo_stack.pop() {
             self.undo_stack.push(UndoEntry {
                 buf: buf.clone(),
@@ -1773,7 +1773,7 @@ mod tests {
         }
     }
 
-    fn setup(text: &str) -> (Vim, String, usize, Vec<Attachment>) {
+    fn setup(text: &str) -> (Vim, String, usize, Vec<AttachmentId>) {
         let mut vim = Vim::new();
         vim.mode = ViMode::Normal;
         vim.sub = SubState::Ready;

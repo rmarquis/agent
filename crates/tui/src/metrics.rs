@@ -177,11 +177,33 @@ pub fn render_stats(entries: &[MetricsEntry]) -> Vec<StatsLine> {
     if stats.by_model.len() > 1 {
         lines.push(StatsLine::Blank);
         lines.push(StatsLine::Heading("per model".into()));
+        let max_model_len = stats.by_model.keys().map(|k| k.len()).max().unwrap_or(0);
+        let max_calls_len = stats
+            .by_model
+            .values()
+            .map(|(_, _, c)| c.to_string().len())
+            .max()
+            .unwrap_or(0);
+        let max_tokens_len = stats
+            .by_model
+            .values()
+            .map(|(p, c, _)| fmt(p + c).len())
+            .max()
+            .unwrap_or(0);
         for (model, (prompt, completion, calls)) in &stats.by_model {
-            lines.push(StatsLine::Sub(format!(
-                "{model}: {calls} calls, {} tokens",
-                fmt(prompt + completion),
-            )));
+            let model_pad = max_model_len.saturating_sub(model.len()) + 2;
+            let calls_str = calls.to_string();
+            let tokens_str = fmt(prompt + completion);
+            let calls_pad = max_calls_len.saturating_sub(calls_str.len());
+            let tokens_pad = max_tokens_len.saturating_sub(tokens_str.len());
+            lines.push(StatsLine::Kv {
+                label: format!("  {model}{}", " ".repeat(model_pad)),
+                value: format!(
+                    "{}{calls_str}    {}{tokens_str}",
+                    " ".repeat(calls_pad),
+                    " ".repeat(tokens_pad),
+                ),
+            });
         }
     }
 

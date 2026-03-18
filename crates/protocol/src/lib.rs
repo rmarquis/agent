@@ -345,7 +345,10 @@ pub enum UiCommand {
     },
 
     /// Generate a title for the session based on recent user messages.
-    GenerateTitle { user_messages: Vec<String>, model: String },
+    GenerateTitle {
+        user_messages: Vec<String>,
+        model: String,
+    },
 
     /// Ask an ephemeral side question (no tools, not added to history).
     Btw {

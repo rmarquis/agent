@@ -286,7 +286,7 @@ fn spawn_predict_request(
             },
         ];
 
-        match tokio::time::timeout(
+        if let Ok(Ok(resp)) = tokio::time::timeout(
             std::time::Duration::from_secs(10),
             provider.chat(
                 &messages,
@@ -299,13 +299,10 @@ fn spawn_predict_request(
         )
         .await
         {
-            Ok(Ok(resp)) => {
-                let text = resp.content.unwrap_or_default().trim().to_string();
-                if !text.is_empty() {
-                    let _ = tx.send(EngineEvent::InputPrediction { text });
-                }
+            let text = resp.content.unwrap_or_default().trim().to_string();
+            if !text.is_empty() {
+                let _ = tx.send(EngineEvent::InputPrediction { text });
             }
-            _ => {}
         }
     });
 }
@@ -371,7 +368,10 @@ impl<'a> Turn<'a> {
     /// Returns true if the command was handled (caller should not fall through).
     fn handle_background_cmd(&self, cmd: UiCommand) -> bool {
         match cmd {
-            UiCommand::GenerateTitle { user_messages, model } => {
+            UiCommand::GenerateTitle {
+                user_messages,
+                model,
+            } => {
                 spawn_title_generation(
                     self.config,
                     self.http_client,
@@ -970,4 +970,3 @@ async fn compact_history(
     new_messages.extend_from_slice(&messages[cut..]);
     Ok(new_messages)
 }
-

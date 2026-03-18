@@ -104,8 +104,7 @@ impl App {
                     state::set_accent(value);
                     self.screen.redraw(true);
                 } else {
-                    self.screen
-                        .notify_error(format!("unknown theme: {}", name));
+                    self.screen.notify_error(format!("unknown theme: {}", name));
                 }
                 CommandAction::Continue
             }
@@ -115,8 +114,7 @@ impl App {
                     crate::theme::set_slug_color(value);
                     self.screen.mark_dirty();
                 } else {
-                    self.screen
-                        .notify_error(format!("unknown color: {}", name));
+                    self.screen.notify_error(format!("unknown color: {}", name));
                 }
                 CommandAction::Continue
             }

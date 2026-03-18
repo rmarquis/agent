@@ -163,16 +163,29 @@ pub fn time_ago(ts_ms: u64, now_ms: u64) -> String {
     format!("{}mo ago", (delta / 2592000).max(1))
 }
 
-pub fn save(session: &Session) {
+pub fn save(session: &Session, store: &crate::attachment::AttachmentStore) {
     let _perf = crate::perf::begin("session_save");
     let dir = sessions_dir();
     let _ = fs::create_dir_all(&dir);
     let ts = now_ms();
 
+    // Write blob files for images and get the URL replacement map.
+    let blob_dir = dir.join(format!("{}.blobs", session.id));
+    let url_to_blob = store.save_blobs(&blob_dir);
+
+    // Clone session and replace inline data URLs with blob refs.
+    let session_out = if url_to_blob.is_empty() {
+        std::borrow::Cow::Borrowed(session)
+    } else {
+        let mut s = session.clone();
+        externalize_blobs(&mut s.messages, &url_to_blob);
+        std::borrow::Cow::Owned(s)
+    };
+
     // Write main session file
     let path = dir.join(format!("{}.json", session.id));
     let tmp = dir.join(format!("{}.{}.tmp", session.id, ts));
-    if let Ok(json) = serde_json::to_string_pretty(session) {
+    if let Ok(json) = serde_json::to_string_pretty(&*session_out) {
         if fs::write(&tmp, json).is_ok() {
             let _ = fs::rename(&tmp, &path);
         }
@@ -191,7 +204,54 @@ pub fn save(session: &Session) {
 pub fn load(id: &str) -> Option<Session> {
     let path = sessions_dir().join(format!("{}.json", id));
     let contents = fs::read_to_string(path).ok()?;
-    serde_json::from_str(&contents).ok()
+    let mut session: Session = serde_json::from_str(&contents).ok()?;
+
+    // Resolve blob refs back to inline data URLs.
+    let blob_dir = sessions_dir().join(format!("{}.blobs", id));
+    if blob_dir.is_dir() {
+        let blob_to_url = crate::attachment::AttachmentStore::load_blobs(&blob_dir);
+        if !blob_to_url.is_empty() {
+            internalize_blobs(&mut session.messages, &blob_to_url);
+        }
+    }
+
+    Some(session)
+}
+
+/// Replace inline `data:` URLs in messages with `blob:` refs.
+fn externalize_blobs(
+    messages: &mut [Message],
+    url_to_blob: &std::collections::HashMap<String, String>,
+) {
+    for msg in messages {
+        if let Some(protocol::Content::Parts(parts)) = &mut msg.content {
+            for part in parts {
+                if let protocol::ContentPart::ImageUrl { url, .. } = part {
+                    if let Some(blob_ref) = url_to_blob.get(url.as_str()) {
+                        *url = blob_ref.clone();
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Replace `blob:` refs in messages with inline data URLs.
+fn internalize_blobs(
+    messages: &mut [Message],
+    blob_to_url: &std::collections::HashMap<String, String>,
+) {
+    for msg in messages {
+        if let Some(protocol::Content::Parts(parts)) = &mut msg.content {
+            for part in parts {
+                if let protocol::ContentPart::ImageUrl { url, .. } = part {
+                    if let Some(data_url) = blob_to_url.get(url.as_str()) {
+                        *url = data_url.clone();
+                    }
+                }
+            }
+        }
+    }
 }
 
 pub fn delete(id: &str) {

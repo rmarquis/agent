@@ -1,4 +1,5 @@
 pub mod app;
+pub mod attachment;
 pub mod completer;
 pub mod config;
 pub mod custom_commands;
