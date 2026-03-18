@@ -142,8 +142,7 @@ impl App {
                             self.engine.send(UiCommand::SetModel {
                                 model: resolved.model_name.clone(),
                                 api_base: resolved.api_base.clone(),
-                                api_key: std::env::var(&resolved.api_key_env)
-                                    .unwrap_or_default(),
+                                api_key: std::env::var(&resolved.api_key_env).unwrap_or_default(),
                             });
                         }
                         self.screen.erase_prompt();
@@ -230,7 +229,10 @@ impl App {
 
         // Handle btw block keys: scroll or dismiss.
         if self.screen.has_btw() {
-            if let Event::Key(KeyEvent { code, modifiers, .. }) = ev {
+            if let Event::Key(KeyEvent {
+                code, modifiers, ..
+            }) = ev
+            {
                 match (code, modifiers) {
                     (KeyCode::Esc, _)
                     | (KeyCode::Char('q'), KeyModifiers::NONE)
@@ -239,13 +241,11 @@ impl App {
                         self.screen.dismiss_btw();
                         return EventOutcome::Noop;
                     }
-                    (KeyCode::Char('d'), KeyModifiers::CONTROL)
-                    | (KeyCode::PageDown, _) => {
+                    (KeyCode::Char('d'), KeyModifiers::CONTROL) | (KeyCode::PageDown, _) => {
                         self.screen.btw_scroll(10);
                         return EventOutcome::Noop;
                     }
-                    (KeyCode::Char('u'), KeyModifiers::CONTROL)
-                    | (KeyCode::PageUp, _) => {
+                    (KeyCode::Char('u'), KeyModifiers::CONTROL) | (KeyCode::PageUp, _) => {
                         self.screen.btw_scroll(-10);
                         return EventOutcome::Noop;
                     }
@@ -439,7 +439,10 @@ impl App {
 
         // Handle btw block keys: scroll or dismiss.
         if self.screen.has_btw() {
-            if let Event::Key(KeyEvent { code, modifiers, .. }) = ev {
+            if let Event::Key(KeyEvent {
+                code, modifiers, ..
+            }) = ev
+            {
                 match (code, modifiers) {
                     (KeyCode::Esc, _)
                     | (KeyCode::Char('q'), KeyModifiers::NONE)
@@ -448,13 +451,11 @@ impl App {
                         self.screen.dismiss_btw();
                         return EventOutcome::Noop;
                     }
-                    (KeyCode::Char('d'), KeyModifiers::CONTROL)
-                    | (KeyCode::PageDown, _) => {
+                    (KeyCode::Char('d'), KeyModifiers::CONTROL) | (KeyCode::PageDown, _) => {
                         self.screen.btw_scroll(10);
                         return EventOutcome::Noop;
                     }
-                    (KeyCode::Char('u'), KeyModifiers::CONTROL)
-                    | (KeyCode::PageUp, _) => {
+                    (KeyCode::Char('u'), KeyModifiers::CONTROL) | (KeyCode::PageUp, _) => {
                         self.screen.btw_scroll(-10);
                         return EventOutcome::Noop;
                     }

@@ -24,7 +24,7 @@ impl HelpDialog {
 
     pub fn new() -> Self {
         Self {
-            list: ListState::new(0, None, 3),
+            list: ListState::new(0, None, 4),
             total_rows: Self::TOTAL_ROWS,
         }
     }
@@ -166,6 +166,12 @@ impl super::Dialog for HelpDialog {
                 crlf(&mut out);
             }
         }
+
+        crlf(&mut out);
+        let _ = out.queue(SetAttribute(Attribute::Dim));
+        let _ = out.queue(Print(" esc: close"));
+        let _ = out.queue(SetAttribute(Attribute::Reset));
+        let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
 
         end_dialog_draw(&mut out);
     }

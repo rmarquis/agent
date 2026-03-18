@@ -168,12 +168,8 @@ fn spawn_btw_request(
     api_key: Option<String>,
     event_tx: &mpsc::UnboundedSender<EngineEvent>,
 ) {
-    let provider = build_provider_with_overrides(
-        config,
-        client,
-        api_base.as_deref(),
-        api_key.as_deref(),
-    );
+    let provider =
+        build_provider_with_overrides(config, client, api_base.as_deref(), api_key.as_deref());
     let model = model.to_string();
     let tx = event_tx.clone();
     tokio::spawn(async move {
@@ -282,7 +278,14 @@ impl<'a> Turn<'a> {
                 );
                 true
             }
-            UiCommand::Btw { question, history, model, reasoning_effort, api_base, api_key } => {
+            UiCommand::Btw {
+                question,
+                history,
+                model,
+                reasoning_effort,
+                api_base,
+                api_key,
+            } => {
                 spawn_btw_request(
                     self.config,
                     self.http_client,
@@ -582,7 +585,11 @@ impl<'a> Turn<'a> {
                 Ok(UiCommand::SetReasoningEffort { effort }) => {
                     self.reasoning_effort = effort;
                 }
-                Ok(UiCommand::SetModel { model, api_base, api_key }) => {
+                Ok(UiCommand::SetModel {
+                    model,
+                    api_base,
+                    api_key,
+                }) => {
                     self.apply_model_change(model, api_base, api_key);
                 }
                 Ok(UiCommand::Cancel) => {
@@ -748,7 +755,11 @@ impl<'a> Turn<'a> {
                 }
                 Some(UiCommand::SetMode { mode }) => self.mode = mode,
                 Some(UiCommand::SetReasoningEffort { effort }) => self.reasoning_effort = effort,
-                Some(UiCommand::SetModel { model, api_base, api_key }) => self.apply_model_change(model, api_base, api_key),
+                Some(UiCommand::SetModel {
+                    model,
+                    api_base,
+                    api_key,
+                }) => self.apply_model_change(model, api_base, api_key),
                 Some(UiCommand::Cancel) => {
                     self.cancel.cancel();
                     return (false, None);
@@ -771,7 +782,11 @@ impl<'a> Turn<'a> {
                 }) if id == request_id => return answer,
                 Some(UiCommand::SetMode { mode }) => self.mode = mode,
                 Some(UiCommand::SetReasoningEffort { effort }) => self.reasoning_effort = effort,
-                Some(UiCommand::SetModel { model, api_base, api_key }) => self.apply_model_change(model, api_base, api_key),
+                Some(UiCommand::SetModel {
+                    model,
+                    api_base,
+                    api_key,
+                }) => self.apply_model_change(model, api_base, api_key),
                 Some(UiCommand::Cancel) => {
                     self.cancel.cancel();
                     return None;

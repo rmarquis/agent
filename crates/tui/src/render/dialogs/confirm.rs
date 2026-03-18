@@ -634,7 +634,17 @@ impl super::Dialog for ConfirmDialog {
         if self.editing {
             let _ = out.queue(Print(" enter: send  esc: cancel"));
         } else if !self.textarea.is_empty() {
-            let _ = out.queue(Print(" enter: confirm with message  tab: edit"));
+            if self.total_preview > 0 {
+                let _ = out.queue(Print(
+                    " enter: confirm with message  tab: edit  ctrl+u/d: scroll",
+                ));
+            } else {
+                let _ = out.queue(Print(" enter: confirm with message  tab: edit"));
+            }
+        } else if self.total_preview > 0 {
+            let _ = out.queue(Print(
+                " enter: confirm  tab: add message  ctrl+u/d: scroll  esc: cancel",
+            ));
         } else {
             let _ = out.queue(Print(" enter: confirm  tab: add message  esc: cancel"));
         }

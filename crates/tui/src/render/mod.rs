@@ -1551,7 +1551,12 @@ fn render_queued(out: &mut RenderOut, queued: &[String], usable: usize) -> u16 {
     rows
 }
 
-fn render_btw(out: &mut RenderOut, btw: &mut BtwBlock, usable: usize, max_content_lines: usize) -> u16 {
+fn render_btw(
+    out: &mut RenderOut,
+    btw: &mut BtwBlock,
+    usable: usize,
+    max_content_lines: usize,
+) -> u16 {
     let max_lines = max_content_lines.max(1);
     let mut rows = 0u16;
 
@@ -1614,10 +1619,10 @@ fn render_btw(out: &mut RenderOut, btw: &mut BtwBlock, usable: usize, max_conten
             if can_scroll {
                 let end = (btw.scroll_offset + visible).min(total);
                 let _ = out.queue(Print(format!(
-                    "   [{end}/{total}]  ctrl+u/d scroll · esc dismiss"
+                    "   [{end}/{total}]  ctrl+u/d: scroll  esc: close"
                 )));
             } else {
-                let _ = out.queue(Print("   esc dismiss"));
+                let _ = out.queue(Print("   esc: close"));
             }
             let _ = out.queue(ResetColor);
             let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
