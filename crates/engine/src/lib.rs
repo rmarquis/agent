@@ -2,6 +2,7 @@ mod agent;
 pub mod config;
 pub mod image;
 pub mod log;
+pub mod paths;
 pub mod permissions;
 pub mod plan;
 pub mod provider;
@@ -12,21 +13,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-pub fn state_dir() -> PathBuf {
-    const APP_NAME: &str = "agent";
-    std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".local")
-                .join("state")
-        })
-        .join(APP_NAME)
-}
-
 pub use config::ModelConfig;
+pub use paths::{cache_dir, config_dir, home_dir, state_dir};
 pub use permissions::Permissions;
 pub use provider::Provider;
 

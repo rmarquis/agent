@@ -91,6 +91,7 @@ impl Completer {
             ("theme", "change accent color"),
             ("color", "set task slug color"),
             ("btw", "ask a side question"),
+            ("permissions", "manage session permissions"),
             ("ps", "manage background processes"),
             ("exit", "exit the app"),
             ("quit", "exit the app"),

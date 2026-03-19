@@ -210,11 +210,28 @@ impl ConfirmDialog {
             ("no".into(), ConfirmChoice::No),
         ];
         if !is_plan {
+            use crate::render::ApprovalScope::{Session, Workspace};
+
+            let cwd_label = std::env::current_dir()
+                .ok()
+                .and_then(|p| {
+                    let home = engine::home_dir();
+                    if let Ok(rel) = p.strip_prefix(&home) {
+                        return Some(format!("~/{}", rel.display()));
+                    }
+                    p.to_str().map(String::from)
+                })
+                .unwrap_or_default();
+
             if let Some(ref dir) = req.outside_dir {
-                let dir_str = dir.to_string_lossy();
+                let dir_str = dir.to_string_lossy().into_owned();
                 options.push((
                     format!("allow {dir_str}"),
-                    ConfirmChoice::AlwaysDir(dir_str.into_owned()),
+                    ConfirmChoice::AlwaysDir(dir_str.clone(), Session),
+                ));
+                options.push((
+                    format!("allow {dir_str} in {cwd_label}"),
+                    ConfirmChoice::AlwaysDir(dir_str, Workspace),
                 ));
             } else if !req.approval_patterns.is_empty() {
                 let display: Vec<&str> = req
@@ -225,12 +242,21 @@ impl ConfirmDialog {
                         d.split("://").nth(1).unwrap_or(d)
                     })
                     .collect();
+                let display_str = display.join(", ");
                 options.push((
-                    format!("allow {}", display.join(", ")),
-                    ConfirmChoice::AlwaysPatterns(req.approval_patterns.clone()),
+                    format!("allow {display_str}"),
+                    ConfirmChoice::AlwaysPatterns(req.approval_patterns.clone(), Session),
+                ));
+                options.push((
+                    format!("allow {display_str} in {cwd_label}"),
+                    ConfirmChoice::AlwaysPatterns(req.approval_patterns.clone(), Workspace),
                 ));
             } else {
-                options.push(("always allow".into(), ConfirmChoice::Always));
+                options.push(("always allow".into(), ConfirmChoice::Always(Session)));
+                options.push((
+                    format!("always allow in {cwd_label}"),
+                    ConfirmChoice::Always(Workspace),
+                ));
             }
         }
 

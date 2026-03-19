@@ -22,8 +22,8 @@ analysis, and assistance.
 - **4 modes** — Normal, Plan, Apply, Yolo with different permission defaults
 - **Vim mode** — full vi keybindings for the input editor
 - **Session management** — auto-save, resume, and fork conversations
-- **Task slug** — short label on the status bar showing what the agent is working
-  on, generated from the conversation
+- **Task slug** — short label on the status bar showing what the agent is
+  working on, generated from the conversation
 - **Input prediction** — ghost text suggesting your next message after a turn
 - **Auto-compact** — LLM-powered conversation summarization to reduce token
   usage
@@ -154,6 +154,22 @@ permissions:
 > **Note:** in Normal and Plan modes, allowed commands that contain output
 > redirection (`>`, `>>`, `&>`) are automatically escalated to Ask.
 
+### Workspace Permissions
+
+When a tool requests permission, the confirm dialog offers two "always allow"
+options:
+
+- **always allow** — session-scoped; lasts until `/clear`, `/new`, or exit
+- **always allow (workspace)** — persisted to disk; applies to all future
+  sessions started in the same working directory
+
+Workspace permissions are stored in
+`~/.local/state/agent/workspaces/<hash>/permissions.json` (keyed by a SHA256
+prefix of the CWD).
+
+Use `/permissions` to view and manage both session and workspace permissions.
+Navigate with `j`/`k`, delete with `dd` or `Backspace`, close with `Esc`.
+
 ## CLI Flags
 
 ```
@@ -199,23 +215,24 @@ Press `Shift+Tab` to cycle through modes:
 
 Type `/` to open the command picker:
 
-| Command                    | Description                    |
-| -------------------------- | ------------------------------ |
-| `/btw <question>`          | Ask a quick side question      |
-| `/clear`, `/new`           | Start a new conversation       |
-| `/resume`                  | Resume a saved session         |
-| `/model`                   | Switch model                   |
-| `/compact [focus]`         | Compact conversation history   |
-| `/vim`                     | Toggle vim mode                |
-| `/theme [name]`            | Change accent color            |
-| `/color [name]`            | Set task slug color (session)  |
-| `/settings`                | Open settings menu             |
-| `/export`                  | Copy conversation to clipboard |
-| `/fork`                    | Fork current session           |
-| `/stats`                   | Show token usage statistics    |
-| `/ps`                      | Manage background processes    |
-| `/exit`, `/quit`           | Exit                           |
-| `:q`, `:qa`, `:wq`, `:wqa` | Exit (vim-style)               |
+| Command                    | Description                            |
+| -------------------------- | -------------------------------------- |
+| `/btw <question>`          | Ask a quick side question              |
+| `/clear`, `/new`           | Start a new conversation               |
+| `/resume`                  | Resume a saved session                 |
+| `/model`                   | Switch model                           |
+| `/compact [focus]`         | Compact conversation history           |
+| `/vim`                     | Toggle vim mode                        |
+| `/theme [name]`            | Change accent color                    |
+| `/color [name]`            | Set task slug color (session)          |
+| `/settings`                | Open settings menu                     |
+| `/export`                  | Copy conversation to clipboard         |
+| `/fork`                    | Fork current session                   |
+| `/stats`                   | Show token usage statistics            |
+| `/permissions`             | Manage session & workspace permissions |
+| `/ps`                      | Manage background processes            |
+| `/exit`, `/quit`           | Exit                                   |
+| `:q`, `:qa`, `:wq`, `:wqa` | Exit (vim-style)                       |
 
 Prefix with `!` to run a shell command directly (e.g. `!git status`).
 

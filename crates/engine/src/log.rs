@@ -49,22 +49,8 @@ fn log_path() -> &'static PathBuf {
     })
 }
 
-fn state_dir() -> PathBuf {
-    const APP_NAME: &str = "agent";
-    std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".local")
-                .join("state")
-        })
-        .join(APP_NAME)
-}
-
 fn dirs() -> PathBuf {
-    state_dir().join("logs")
+    crate::paths::state_dir().join("logs")
 }
 
 pub fn entry(level: Level, event: &str, data: &impl Serialize) {

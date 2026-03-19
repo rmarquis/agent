@@ -546,10 +546,90 @@ impl App {
                     self.screen.clear_dialog_area(anchor);
                 }
             }
+            render::DialogResult::PermissionsClosed {
+                session_remaining,
+                workspace_remaining,
+            } => {
+                self.sync_permissions(session_remaining, workspace_remaining);
+                self.screen.clear_dialog_area(anchor);
+            }
             render::DialogResult::PsClosed | render::DialogResult::Dismissed => {
                 self.screen.clear_dialog_area(anchor);
             }
         }
+    }
+
+    pub(super) fn session_permission_entries(&self) -> Vec<render::PermissionEntry> {
+        let mut entries = Vec::new();
+        let mut tools: Vec<_> = self.session_approved.keys().collect();
+        tools.sort();
+        for tool in tools {
+            let patterns = &self.session_approved[tool];
+            if patterns.is_empty() {
+                entries.push(render::PermissionEntry {
+                    tool: tool.clone(),
+                    pattern: "*".into(),
+                });
+            } else {
+                for p in patterns {
+                    entries.push(render::PermissionEntry {
+                        tool: tool.clone(),
+                        pattern: p.as_str().to_string(),
+                    });
+                }
+            }
+        }
+        for dir in &self.session_approved_dirs {
+            entries.push(render::PermissionEntry {
+                tool: "directory".into(),
+                pattern: dir.display().to_string(),
+            });
+        }
+        entries
+    }
+
+    fn sync_permissions(
+        &mut self,
+        session_entries: Vec<render::PermissionEntry>,
+        workspace_rules: Vec<crate::workspace_permissions::Rule>,
+    ) {
+        // Rebuild session approvals from flattened entries.
+        self.session_approved.clear();
+        self.session_approved_dirs.clear();
+        for entry in session_entries {
+            if entry.tool == "directory" {
+                self.session_approved_dirs
+                    .push(std::path::PathBuf::from(&entry.pattern));
+            } else if entry.pattern == "*" {
+                self.session_approved.entry(entry.tool).or_default();
+            } else if let Ok(pat) = glob::Pattern::new(&entry.pattern) {
+                self.session_approved
+                    .entry(entry.tool)
+                    .or_default()
+                    .push(pat);
+            }
+        }
+
+        // Persist and reload workspace rules.
+        self.workspace_rules = workspace_rules;
+        crate::workspace_permissions::save(&self.cwd, &self.workspace_rules);
+        let (ws_tools, ws_dirs) =
+            crate::workspace_permissions::into_approvals(&self.workspace_rules);
+        self.workspace_approved = ws_tools;
+        self.workspace_approved_dirs = ws_dirs;
+    }
+
+    fn reload_workspace_permissions(&mut self) {
+        self.workspace_rules = crate::workspace_permissions::load(&self.cwd);
+        let (ws_tools, ws_dirs) =
+            crate::workspace_permissions::into_approvals(&self.workspace_rules);
+        self.workspace_approved = ws_tools;
+        self.workspace_approved_dirs = ws_dirs;
+    }
+
+    pub(super) fn reset_session_permissions(&mut self) {
+        self.session_approved.clear();
+        self.session_approved_dirs.clear();
     }
 
     /// Resolve a completed confirm dialog choice.
@@ -563,11 +643,11 @@ impl App {
     ) -> bool {
         let label = match &choice {
             ConfirmChoice::Yes => "approved",
-            ConfirmChoice::Always => "always",
-            ConfirmChoice::AlwaysPatterns(ref pats) => {
+            ConfirmChoice::Always(_) => "always",
+            ConfirmChoice::AlwaysPatterns(ref pats, _) => {
                 pats.first().map(|s| s.as_str()).unwrap_or("pattern")
             }
-            ConfirmChoice::AlwaysDir(dir) => dir.as_str(),
+            ConfirmChoice::AlwaysDir(dir, _) => dir.as_str(),
             ConfirmChoice::No => "denied",
         };
         if let Some(ref msg) = message {
@@ -591,8 +671,16 @@ impl App {
                 }
                 false
             }
-            ConfirmChoice::Always => {
-                self.auto_approved.insert(tool_name.to_string(), vec![]);
+            ConfirmChoice::Always(scope) => {
+                match scope {
+                    ApprovalScope::Session => {
+                        self.session_approved.insert(tool_name.to_string(), vec![]);
+                    }
+                    ApprovalScope::Workspace => {
+                        crate::workspace_permissions::add_tool(&self.cwd, tool_name, vec![]);
+                        self.reload_workspace_permissions();
+                    }
+                }
                 self.screen.set_active_status(ToolStatus::Pending);
                 self.engine.send(UiCommand::PermissionDecision {
                     request_id,
@@ -601,15 +689,27 @@ impl App {
                 });
                 false
             }
-            ConfirmChoice::AlwaysPatterns(ref patterns) => {
-                let compiled: Vec<glob::Pattern> = patterns
-                    .iter()
-                    .filter_map(|p| glob::Pattern::new(p).ok())
-                    .collect();
-                self.auto_approved
-                    .entry(tool_name.to_string())
-                    .or_default()
-                    .extend(compiled);
+            ConfirmChoice::AlwaysPatterns(ref patterns, scope) => {
+                match scope {
+                    ApprovalScope::Session => {
+                        let compiled: Vec<glob::Pattern> = patterns
+                            .iter()
+                            .filter_map(|p| glob::Pattern::new(p).ok())
+                            .collect();
+                        self.session_approved
+                            .entry(tool_name.to_string())
+                            .or_default()
+                            .extend(compiled);
+                    }
+                    ApprovalScope::Workspace => {
+                        crate::workspace_permissions::add_tool(
+                            &self.cwd,
+                            tool_name,
+                            patterns.clone(),
+                        );
+                        self.reload_workspace_permissions();
+                    }
+                }
                 self.screen.set_active_status(ToolStatus::Pending);
                 self.engine.send(UiCommand::PermissionDecision {
                     request_id,
@@ -618,8 +718,17 @@ impl App {
                 });
                 false
             }
-            ConfirmChoice::AlwaysDir(ref dir) => {
-                self.auto_approved_dirs.push(std::path::PathBuf::from(dir));
+            ConfirmChoice::AlwaysDir(ref dir, scope) => {
+                match scope {
+                    ApprovalScope::Session => {
+                        self.session_approved_dirs
+                            .push(std::path::PathBuf::from(dir));
+                    }
+                    ApprovalScope::Workspace => {
+                        crate::workspace_permissions::add_dir(&self.cwd, dir);
+                        self.reload_workspace_permissions();
+                    }
+                }
                 self.screen.set_active_status(ToolStatus::Pending);
                 self.engine.send(UiCommand::PermissionDecision {
                     request_id,
@@ -722,13 +831,19 @@ impl App {
                 // Check auto-approvals (doesn't need UI).
                 // Split compound commands into sub-commands and check each
                 // individually against the stored patterns.
-                if let Some(patterns) = self.auto_approved.get(&req.tool_name) {
-                    if patterns.is_empty() || {
+                let session_pats = self.session_approved.get(&req.tool_name);
+                let workspace_pats = self.workspace_approved.get(&req.tool_name);
+                if session_pats.is_some() || workspace_pats.is_some() {
+                    // Empty vec means "allow all" for that tool.
+                    let blanket = session_pats.is_some_and(|p| p.is_empty())
+                        || workspace_pats.is_some_and(|p| p.is_empty());
+                    if blanket || {
                         let subcmds = engine::permissions::split_shell_commands(&req.desc);
+                        let all_pats = session_pats.into_iter().chain(workspace_pats).flatten();
                         !subcmds.is_empty()
                             && subcmds
                                 .iter()
-                                .all(|sc| patterns.iter().any(|p| p.matches(sc)))
+                                .all(|sc| all_pats.clone().any(|p| p.matches(sc)))
                     } {
                         self.engine.send(UiCommand::PermissionDecision {
                             request_id: req.request_id,
@@ -743,12 +858,16 @@ impl App {
                 let outside_paths = self
                     .permissions
                     .outside_workspace_paths(&req.tool_name, &req.args);
+                let all_dirs = self
+                    .session_approved_dirs
+                    .iter()
+                    .chain(self.workspace_approved_dirs.iter());
                 if !outside_paths.is_empty()
                     && outside_paths.iter().all(|p| {
                         let dir = std::path::Path::new(p)
                             .parent()
                             .unwrap_or(std::path::Path::new(p));
-                        self.auto_approved_dirs.iter().any(|ad| dir.starts_with(ad))
+                        all_dirs.clone().any(|ad| dir.starts_with(ad))
                     })
                 {
                     self.engine.send(UiCommand::PermissionDecision {
@@ -778,6 +897,19 @@ impl App {
                 } else {
                     None
                 };
+
+                // Strip patterns the user already approved (session or workspace).
+                if !req.approval_patterns.is_empty() {
+                    let approved: Vec<&glob::Pattern> = self
+                        .session_approved
+                        .get(&req.tool_name)
+                        .into_iter()
+                        .chain(self.workspace_approved.get(&req.tool_name))
+                        .flatten()
+                        .collect();
+                    req.approval_patterns
+                        .retain(|p| !approved.iter().any(|g| g.as_str() == p));
+                }
 
                 // If the user is actively typing, defer the dialog.
                 let recently_typed = last_keypress

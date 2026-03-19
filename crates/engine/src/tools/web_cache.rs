@@ -5,13 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const DEFAULT_TTL: Duration = Duration::from_secs(15 * 60);
 
 fn cache_dir() -> PathBuf {
-    let base = std::env::var("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-            PathBuf::from(home).join(".cache")
-        });
-    base.join("agent").join("web")
+    crate::paths::cache_dir().join("web")
 }
 
 fn key_path(key: &str) -> PathBuf {

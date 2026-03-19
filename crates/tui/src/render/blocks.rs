@@ -14,8 +14,8 @@ use super::highlight::{
     render_markdown_table,
 };
 use super::{
-    crlf, truncate_str, wrap_line, ActiveExec, Block, ConfirmChoice, RenderOut, ToolOutput,
-    ToolStatus,
+    crlf, truncate_str, wrap_line, ActiveExec, ApprovalScope, Block, ConfirmChoice, RenderOut,
+    ToolOutput, ToolStatus,
 };
 
 /// Element types for spacing calculation.
@@ -320,14 +320,29 @@ fn render_confirm_result(
             ConfirmChoice::Yes => {
                 print_dim(out, "approved");
             }
-            ConfirmChoice::Always => {
-                print_dim(out, "always");
+            ConfirmChoice::Always(scope) => {
+                let suffix = if scope == ApprovalScope::Workspace {
+                    " (workspace)"
+                } else {
+                    ""
+                };
+                print_dim(out, &format!("always{suffix}"));
             }
-            ConfirmChoice::AlwaysPatterns(ref pats) => {
-                print_dim(out, &format!("always ({})", pats.join(", ")));
+            ConfirmChoice::AlwaysPatterns(ref pats, scope) => {
+                let suffix = if scope == ApprovalScope::Workspace {
+                    " workspace"
+                } else {
+                    ""
+                };
+                print_dim(out, &format!("always{suffix} ({})", pats.join(", ")));
             }
-            ConfirmChoice::AlwaysDir(ref dir) => {
-                print_dim(out, &format!("always (dir: {})", dir));
+            ConfirmChoice::AlwaysDir(ref dir, scope) => {
+                let suffix = if scope == ApprovalScope::Workspace {
+                    " workspace"
+                } else {
+                    ""
+                };
+                print_dim(out, &format!("always{suffix} (dir: {dir})"));
             }
             ConfirmChoice::No => {
                 let _ = out.queue(SetForegroundColor(theme::ERROR));

@@ -7,8 +7,8 @@ use crate::input::{
     resolve_agent_esc, Action, EscAction, History, InputState, MenuKind, MenuResult,
 };
 use crate::render::{
-    tool_arg_summary, Block, ConfirmChoice, ConfirmDialog, ConfirmRequest, Dialog as _,
-    FramePrompt, QuestionDialog, ResumeEntry, Screen, ToolOutput, ToolStatus,
+    tool_arg_summary, ApprovalScope, Block, ConfirmChoice, ConfirmDialog, ConfirmRequest,
+    Dialog as _, FramePrompt, QuestionDialog, ResumeEntry, Screen, ToolOutput, ToolStatus,
 };
 use crate::session::Session;
 use crate::{render, session, state, vim};
@@ -44,11 +44,18 @@ pub struct App {
     exec_rx: Option<tokio::sync::mpsc::UnboundedReceiver<commands::ExecEvent>>,
     exec_kill: Option<std::sync::Arc<tokio::sync::Notify>>,
     pub queued_messages: Vec<String>,
-    pub auto_approved: HashMap<String, Vec<glob::Pattern>>,
+    /// Session-scoped auto-approvals (cleared on /clear, /new, rewind).
+    pub session_approved: HashMap<String, Vec<glob::Pattern>>,
+    pub session_approved_dirs: Vec<PathBuf>,
+    /// Workspace-persisted approvals (survive across sessions).
+    pub workspace_approved: HashMap<String, Vec<glob::Pattern>>,
+    pub workspace_approved_dirs: Vec<PathBuf>,
+    /// Workspace rules as loaded from disk (source of truth for persistence).
+    pub workspace_rules: Vec<crate::workspace_permissions::Rule>,
+    /// Current working directory (cached at startup).
+    cwd: String,
     /// Directories outside the workspace that have appeared in confirm dialogs.
     pub seen_outside_dirs: HashSet<PathBuf>,
-    /// Directories the user has chosen to "always allow" — global across all tools.
-    pub auto_approved_dirs: Vec<PathBuf>,
     pub session: session::Session,
     pub shared_session: Arc<Mutex<Option<Session>>>,
     pub context_window: Option<u32>,
@@ -311,6 +318,15 @@ impl App {
         screen.set_model_label(model.clone());
         screen.set_reasoning_effort(reasoning_effort);
         screen.set_show_speed(show_speed);
+
+        let cwd = std::env::current_dir()
+            .ok()
+            .and_then(|p| p.to_str().map(String::from))
+            .unwrap_or_default();
+        let workspace_rules = crate::workspace_permissions::load(&cwd);
+        let (workspace_approved, workspace_approved_dirs) =
+            crate::workspace_permissions::into_approvals(&workspace_rules);
+
         Self {
             model,
             api_base,
@@ -324,9 +340,13 @@ impl App {
             exec_rx: None,
             exec_kill: None,
             queued_messages: Vec::new(),
-            auto_approved: HashMap::new(),
+            session_approved: HashMap::new(),
+            session_approved_dirs: Vec::new(),
+            workspace_approved,
+            workspace_approved_dirs,
+            workspace_rules,
+            cwd,
             seen_outside_dirs: HashSet::new(),
-            auto_approved_dirs: Vec::new(),
             session: session::Session::new(),
             shared_session,
             context_window: None,

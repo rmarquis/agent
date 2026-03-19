@@ -1,5 +1,6 @@
 mod confirm;
 mod help;
+mod permissions;
 mod ps;
 mod question;
 mod resume;
@@ -7,6 +8,7 @@ mod rewind;
 
 pub use confirm::ConfirmDialog;
 pub use help::HelpDialog;
+pub use permissions::{PermissionEntry, PermissionsDialog};
 pub use ps::PsDialog;
 pub use question::{parse_questions, Question, QuestionDialog, QuestionOption};
 pub use resume::ResumeDialog;
@@ -38,6 +40,10 @@ pub enum DialogResult {
         session_id: Option<String>,
     },
     PsClosed,
+    PermissionsClosed {
+        session_remaining: Vec<PermissionEntry>,
+        workspace_remaining: Vec<crate::workspace_permissions::Rule>,
+    },
 }
 
 pub trait Dialog {

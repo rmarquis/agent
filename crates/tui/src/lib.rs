@@ -14,6 +14,7 @@ pub mod state;
 pub mod theme;
 pub mod utils;
 pub mod vim;
+pub mod workspace_permissions;
 
 /// Expand @path references in user input: if a token starts with @ and
 /// the rest is an existing file path, append the file contents.

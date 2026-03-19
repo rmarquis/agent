@@ -8,8 +8,9 @@ use prompt::PromptState;
 use working::WorkingState;
 
 pub use dialogs::{
-    parse_questions, ConfirmDialog, Dialog, DialogResult, HelpDialog, PsDialog, Question,
-    QuestionDialog, QuestionOption, ResumeDialog, RewindDialog,
+    parse_questions, ConfirmDialog, Dialog, DialogResult, HelpDialog, PermissionEntry,
+    PermissionsDialog, PsDialog, Question, QuestionDialog, QuestionOption, ResumeDialog,
+    RewindDialog,
 };
 
 use crate::attachment::{AttachmentId, AttachmentStore};
@@ -288,15 +289,19 @@ pub enum Block {
     },
 }
 
+#[derive(Clone, Copy, PartialEq)]
+pub enum ApprovalScope {
+    Session,
+    Workspace,
+}
+
 #[derive(Clone, PartialEq)]
 pub enum ConfirmChoice {
     Yes,
     No,
-    Always,
-    /// Approve all future calls matching these patterns (e.g. "cargo *", "*.github.com").
-    AlwaysPatterns(Vec<String>),
-    /// Approve all future tool calls targeting a specific directory (global).
-    AlwaysDir(String),
+    Always(ApprovalScope),
+    AlwaysPatterns(Vec<String>, ApprovalScope),
+    AlwaysDir(String, ApprovalScope),
 }
 
 #[derive(Clone, Copy, PartialEq)]

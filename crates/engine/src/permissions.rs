@@ -189,16 +189,7 @@ fn build_mode(raw: &RawModePerms, mode: Mode) -> ModePerms {
 }
 
 fn config_dir() -> PathBuf {
-    const APP_NAME: &str = "agent";
-    std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".config")
-        })
-        .join(APP_NAME)
+    crate::paths::config_dir()
 }
 
 impl Permissions {
@@ -889,10 +880,7 @@ fn normalize_path(path: &Path) -> PathBuf {
 
 fn resolve_path(path_str: &str, workspace: &Path) -> PathBuf {
     if let Some(rest) = path_str.strip_prefix("~/") {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/"));
-        let resolved = home.join(rest);
+        let resolved = crate::paths::home_dir().join(rest);
         resolved
             .canonicalize()
             .unwrap_or_else(|_| normalize_path(&resolved))

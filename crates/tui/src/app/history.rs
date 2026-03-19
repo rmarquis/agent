@@ -33,7 +33,7 @@ impl App {
     pub fn reset_session(&mut self) {
         self.history.clear();
         self.token_snapshots.clear();
-        self.auto_approved.clear();
+        self.reset_session_permissions();
         self.queued_messages.clear();
         self.screen.clear();
         self.input.clear();
@@ -79,7 +79,7 @@ impl App {
         self.token_snapshots = self.session.token_snapshots.clone();
         self.token_snapshots
             .retain(|(len, _)| *len <= self.history.len());
-        self.auto_approved.clear();
+        self.reset_session_permissions();
         self.queued_messages.clear();
         self.input.clear();
         self.input.store.clear();
@@ -454,7 +454,7 @@ impl App {
             self.screen.clear_context_tokens();
         }
         self.screen.truncate_to(block_idx);
-        self.auto_approved.clear();
+        self.reset_session_permissions();
         self.compact_epoch += 1;
 
         turn_text.map(|t| (t, images))

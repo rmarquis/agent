@@ -57,6 +57,19 @@ impl App {
                     )))
                 }
             }
+            "/permissions" => {
+                let session_entries = self.session_permission_entries();
+                if session_entries.is_empty() && self.workspace_rules.is_empty() {
+                    self.screen.notify_error("no permissions".into());
+                    CommandAction::Continue
+                } else {
+                    CommandAction::OpenDialog(Box::new(render::PermissionsDialog::new(
+                        session_entries,
+                        self.workspace_rules.clone(),
+                        Some(terminal::size().map(|(_, h)| h / 2).unwrap_or(12)),
+                    )))
+                }
+            }
             "/fork" => {
                 self.fork_session();
                 CommandAction::Continue
