@@ -1182,22 +1182,59 @@ fn cursor_in_at_zone(buf: &str, cpos: usize) -> Option<usize> {
     Some(at_pos)
 }
 
-/// Read image data from the system clipboard, encode as PNG, and return a data URL.
+/// Read image data from the system clipboard and return a data URL.
+///
+/// On macOS, uses `osascript` to write clipboard image to a temp file.
+/// On Linux, tries `xclip` then `wl-paste`.
 fn clipboard_image_to_data_url() -> Option<String> {
     use base64::Engine;
-    use image::{ImageBuffer, ImageFormat, RgbaImage};
 
-    let mut clipboard = arboard::Clipboard::new().ok()?;
-    let img_data = clipboard.get_image().ok()?;
-    let rgba: RgbaImage = ImageBuffer::from_raw(
-        img_data.width as u32,
-        img_data.height as u32,
-        img_data.bytes.into_owned(),
-    )?;
-    let mut buf = Vec::new();
-    let mut cursor = std::io::Cursor::new(&mut buf);
-    rgba.write_to(&mut cursor, ImageFormat::Png).ok()?;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&buf);
+    let tmp = std::env::temp_dir().join("agent_clipboard.png");
+    let tmp_str = tmp.to_string_lossy();
+
+    let ok = if cfg!(target_os = "macos") {
+        std::process::Command::new("osascript")
+            .args([
+                "-e",
+                &format!(
+                    "set f to (open for access POSIX file \"{}\" with write permission)\n\
+                     try\n\
+                       write (the clipboard as «class PNGf») to f\n\
+                     end try\n\
+                     close access f",
+                    tmp_str
+                ),
+            ])
+            .output()
+            .ok()
+            .is_some_and(|o| o.status.success())
+    } else {
+        // Try xclip first, then wl-paste.
+        std::process::Command::new("xclip")
+            .args(["-selection", "clipboard", "-t", "image/png", "-o"])
+            .stdout(std::fs::File::create(&tmp).ok()?)
+            .status()
+            .ok()
+            .is_some_and(|s| s.success())
+            || std::process::Command::new("wl-paste")
+                .args(["--type", "image/png"])
+                .stdout(std::fs::File::create(&tmp).ok()?)
+                .status()
+                .ok()
+                .is_some_and(|s| s.success())
+    };
+
+    if !ok {
+        let _ = std::fs::remove_file(&tmp);
+        return None;
+    }
+
+    let bytes = std::fs::read(&tmp).ok()?;
+    let _ = std::fs::remove_file(&tmp);
+    if bytes.is_empty() {
+        return None;
+    }
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
     Some(format!("data:image/png;base64,{b64}"))
 }
 

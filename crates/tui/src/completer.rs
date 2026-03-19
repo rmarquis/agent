@@ -202,7 +202,6 @@ impl Completer {
     }
 }
 
-
 /// Get tracked + untracked (but not ignored) files and directories via git.
 /// Falls back to a filesystem walk when not inside a git repository.
 fn git_files() -> Vec<String> {

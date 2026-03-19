@@ -304,7 +304,7 @@ impl App {
             self.screen.notify_error("nothing to export".into());
             return;
         }
-        match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(&text)) {
+        match copy_to_clipboard(&text) {
             Ok(()) => {
                 self.screen
                     .notify("conversation copied to clipboard".into());
@@ -353,5 +353,41 @@ impl App {
             }
         }
         out.trim_end().to_string()
+    }
+}
+
+/// Copy text to the system clipboard using platform commands.
+fn copy_to_clipboard(text: &str) -> Result<(), String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let (cmd, args): (&str, &[&str]) = if cfg!(target_os = "macos") {
+        ("pbcopy", &[])
+    } else if std::env::var("WAYLAND_DISPLAY").is_ok() {
+        ("wl-copy", &[])
+    } else {
+        ("xclip", &["-selection", "clipboard"])
+    };
+
+    let mut child = Command::new(cmd)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("{cmd}: {e}"))?;
+
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(text.as_bytes())
+        .map_err(|e| e.to_string())?;
+
+    let status = child.wait().map_err(|e| e.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{cmd} exited with {status}"))
     }
 }

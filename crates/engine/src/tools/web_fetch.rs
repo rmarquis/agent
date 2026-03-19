@@ -1,7 +1,5 @@
 use super::web_cache;
-use super::web_shared::{
-    domain_pattern, next_user_agent, truncate_output, ParsedHtml,
-};
+use super::web_shared::{domain_pattern, next_user_agent, truncate_output, ParsedHtml};
 use super::{str_arg, Tool, ToolContext, ToolFuture, ToolResult};
 use base64::Engine;
 use serde_json::Value;

@@ -1,3 +1,4 @@
+use crate::cancel::CancellationToken;
 use crate::log;
 use crate::tools::trim_tool_output;
 use protocol::{Content, Message, ReasoningEffort, Role, ToolCall};
@@ -5,7 +6,6 @@ use reqwest::Client;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
-use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolDefinition {
@@ -475,7 +475,6 @@ impl Provider {
             Ok(normalize_short(&text))
         }
     }
-
 
     pub async fn extract_web_content(
         &self,

@@ -32,7 +32,7 @@ pub async fn engine_task(
     // Process completion channel for background processes
     let (proc_done_tx, mut proc_done_rx) = mpsc::unbounded_channel::<(String, Option<i32>)>();
     // Cancellation token for the in-flight prediction request.
-    let mut predict_cancel = tokio_util::sync::CancellationToken::new();
+    let mut predict_cancel = crate::cancel::CancellationToken::new();
 
     loop {
         tokio::select! {
@@ -64,7 +64,7 @@ pub async fn engine_task(
                             event_tx: &event_tx,
                             config: &config,
                             http_client: &client,
-                            cancel: tokio_util::sync::CancellationToken::new(),
+                            cancel: crate::cancel::CancellationToken::new(),
                             messages: Vec::new(),
                             mode,
                             reasoning_effort,
@@ -77,7 +77,7 @@ pub async fn engine_task(
                     }
                     UiCommand::Compact { keep_turns, history, model, focus } => {
                         let provider = build_provider(&config, &client);
-                        let cancel = tokio_util::sync::CancellationToken::new();
+                        let cancel = crate::cancel::CancellationToken::new();
                         match compact_history(&provider, &history, keep_turns, &model, focus.as_deref(), &cancel).await {
                             Ok(messages) => {
                                 let _ = event_tx.send(EngineEvent::CompactionComplete { messages });
@@ -95,7 +95,7 @@ pub async fn engine_task(
                     }
                     UiCommand::PredictInput { history, model, api_base, api_key } => {
                         predict_cancel.cancel();
-                        predict_cancel = tokio_util::sync::CancellationToken::new();
+                        predict_cancel = crate::cancel::CancellationToken::new();
                         spawn_predict_request(&config, &client, &model, history, api_base, api_key, &event_tx, predict_cancel.clone());
                     }
                     _ => {} // Steer, Cancel, etc. only relevant during a turn
@@ -180,7 +180,7 @@ fn spawn_btw_request(
     let model = model.to_string();
     let tx = event_tx.clone();
     tokio::spawn(async move {
-        let cancel = tokio_util::sync::CancellationToken::new();
+        let cancel = crate::cancel::CancellationToken::new();
 
         let mut messages = Vec::with_capacity(history.len() + 2);
         messages.push(protocol::Message::system(
@@ -211,7 +211,7 @@ fn spawn_predict_request(
     api_base: Option<String>,
     api_key: Option<String>,
     event_tx: &mpsc::UnboundedSender<EngineEvent>,
-    cancel: tokio_util::sync::CancellationToken,
+    cancel: crate::cancel::CancellationToken,
 ) {
     let provider =
         build_provider_with_overrides(config, client, api_base.as_deref(), api_key.as_deref());
@@ -315,7 +315,7 @@ struct Turn<'a> {
     event_tx: &'a mpsc::UnboundedSender<EngineEvent>,
     config: &'a EngineConfig,
     http_client: &'a reqwest::Client,
-    cancel: tokio_util::sync::CancellationToken,
+    cancel: crate::cancel::CancellationToken,
     messages: Vec<Message>,
     mode: Mode,
     reasoning_effort: ReasoningEffort,
@@ -497,7 +497,8 @@ impl<'a> Turn<'a> {
                     continue;
                 }
 
-                self.messages.push(Message::assistant(content, reasoning, None));
+                self.messages
+                    .push(Message::assistant(content, reasoning, None));
                 self.messages.remove(0);
                 let msgs = std::mem::take(&mut self.messages);
                 self.emit(EngineEvent::TurnComplete {
@@ -509,8 +510,11 @@ impl<'a> Turn<'a> {
 
             // Has tool calls — execute them
             empty_retries = 0;
-            self.messages
-                .push(Message::assistant(content, reasoning, Some(tool_calls.clone())));
+            self.messages.push(Message::assistant(
+                content,
+                reasoning,
+                Some(tool_calls.clone()),
+            ));
 
             for tc in &tool_calls {
                 self.drain_commands();
@@ -852,7 +856,7 @@ async fn compact_history(
     keep_turns: usize,
     model: &str,
     focus: Option<&str>,
-    cancel: &tokio_util::sync::CancellationToken,
+    cancel: &crate::cancel::CancellationToken,
 ) -> Result<Vec<Message>, String> {
     let mut user_count = 0;
     let mut cut = messages.len();

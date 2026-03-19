@@ -22,10 +22,10 @@ use crossterm::{
     },
     terminal, ExecutableCommand,
 };
-use futures_util::StreamExt;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -625,7 +625,7 @@ impl App {
             tokio::select! {
                 biased;
 
-                Some(Ok(ev)) = term_events.next() => {
+                Some(Ok(ev)) = stream_next(&mut term_events) => {
                     if self.dispatch_terminal_event(
                         ev, &mut agent, &mut t, &mut active_dialog,
                     ) {
@@ -852,6 +852,14 @@ impl App {
         self.screen.set_show_tool_in_dialog(fits);
         *active_dialog = Some(dialog);
     }
+}
+
+/// Poll one item from a `futures_core::Stream`, equivalent to `StreamExt::next`.
+async fn stream_next<S>(stream: &mut S) -> Option<S::Item>
+where
+    S: futures_core::Stream + Unpin,
+{
+    std::future::poll_fn(|cx| Pin::new(&mut *stream).poll_next(cx)).await
 }
 
 #[cfg(test)]

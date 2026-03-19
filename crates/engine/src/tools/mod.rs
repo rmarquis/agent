@@ -13,6 +13,7 @@ mod web_search;
 mod web_shared;
 mod write_file;
 
+use crate::cancel::CancellationToken;
 use crate::permissions::{Decision, Permissions};
 use crate::provider::{FunctionSchema, Provider, ToolDefinition};
 use protocol::{EngineEvent, Mode};
@@ -23,7 +24,6 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 
 pub use ask_user_question::AskUserQuestionTool;
 pub use background::{ProcessInfo, ProcessRegistry};
