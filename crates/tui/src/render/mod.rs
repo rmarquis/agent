@@ -298,6 +298,7 @@ pub enum ApprovalScope {
 #[derive(Clone, PartialEq)]
 pub enum ConfirmChoice {
     Yes,
+    YesAutoApply,
     No,
     Always(ApprovalScope),
     AlwaysPatterns(Vec<String>, ApprovalScope),

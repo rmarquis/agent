@@ -638,7 +638,7 @@ impl App {
         agent: &mut Option<TurnState>,
     ) -> bool {
         let label = match &choice {
-            ConfirmChoice::Yes => "approved",
+            ConfirmChoice::Yes | ConfirmChoice::YesAutoApply => "approved",
             ConfirmChoice::Always(_) => "always",
             ConfirmChoice::AlwaysPatterns(ref pats, _) => {
                 pats.first().map(|s| s.as_str()).unwrap_or("pattern")
@@ -651,15 +651,14 @@ impl App {
                 .set_active_user_message(format!("{label}: {msg}"));
         }
         match choice {
-            ConfirmChoice::Yes => {
+            ConfirmChoice::Yes | ConfirmChoice::YesAutoApply => {
                 self.screen.set_active_status(ToolStatus::Pending);
                 self.engine.send(UiCommand::PermissionDecision {
                     request_id,
                     approved: true,
                     message,
                 });
-                // Auto-switch to Apply mode when a plan is approved.
-                if tool_name == "exit_plan_mode" {
+                if matches!(choice, ConfirmChoice::YesAutoApply) {
                     self.mode = Mode::Apply;
                     state::set_mode(self.mode);
                     self.engine.send(UiCommand::SetMode { mode: self.mode });

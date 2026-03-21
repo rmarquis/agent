@@ -92,7 +92,7 @@ impl ConfirmPreview {
             ConfirmPreview::PlanContent { summary } => {
                 let mut buf = RenderOut::buffer();
                 crate::render::blocks::render_markdown_inner(
-                    &mut buf, summary, width, " ", true, None,
+                    &mut buf, summary, width, " ", false, None,
                 );
                 let _ = buf.flush();
                 let bytes = buf.into_bytes();
@@ -147,7 +147,7 @@ impl ConfirmPreview {
             ConfirmPreview::PlanContent { summary } => {
                 let mut buf = RenderOut::buffer();
                 crate::render::blocks::render_markdown_inner(
-                    &mut buf, summary, width, " ", true, None,
+                    &mut buf, summary, width, " ", false, None,
                 );
                 let _ = buf.flush();
                 let bytes: Vec<u8> = buf.into_bytes();
@@ -205,10 +205,18 @@ pub struct ConfirmDialog {
 impl ConfirmDialog {
     pub fn new(req: &crate::render::ConfirmRequest) -> Self {
         let is_plan = req.tool_name == "exit_plan_mode";
-        let mut options: Vec<(String, ConfirmChoice)> = vec![
-            ("yes".into(), ConfirmChoice::Yes),
-            ("no".into(), ConfirmChoice::No),
-        ];
+        let mut options: Vec<(String, ConfirmChoice)> = if is_plan {
+            vec![
+                ("yes, and auto-apply".into(), ConfirmChoice::YesAutoApply),
+                ("yes".into(), ConfirmChoice::Yes),
+                ("no".into(), ConfirmChoice::No),
+            ]
+        } else {
+            vec![
+                ("yes".into(), ConfirmChoice::Yes),
+                ("no".into(), ConfirmChoice::No),
+            ]
+        };
         if !is_plan {
             use crate::render::ApprovalScope::{Session, Workspace};
 

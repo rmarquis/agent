@@ -964,7 +964,7 @@ fn print_split_regions(
 
 /// Strip inline markdown markers (`**`, `*`, `__`, `_`, `` ` ``, `~~`) and
 /// return the visible text content. Used for measuring visual width.
-fn strip_markdown_markers(text: &str) -> String {
+pub(crate) fn strip_markdown_markers(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
     let len = chars.len();
     let mut out = String::with_capacity(len);

@@ -202,11 +202,9 @@ async fn main() {
         });
     }
 
-    // Assemble the system prompt
+    // Load instructions and workspace
     let cwd = std::env::current_dir().unwrap_or_default();
     let instructions = tui::instructions::load();
-    let initial_mode = mode_override.unwrap_or(protocol::Mode::Normal);
-    let system_prompt = engine::build_system_prompt(initial_mode, &cwd, instructions.as_deref());
 
     // Start the engine
     let mut permissions = engine::Permissions::load();
@@ -225,7 +223,7 @@ async fn main() {
             min_p: model_config.min_p,
             repeat_penalty: model_config.repeat_penalty,
         },
-        system_prompt,
+        instructions,
         cwd,
         permissions: permissions.clone(),
     });

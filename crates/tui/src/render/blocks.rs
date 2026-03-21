@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use super::highlight::{
     print_highlighted_bash_line, print_inline_diff, print_syntax_file, render_code_block,
-    render_markdown_table,
+    render_markdown_table, strip_markdown_markers,
 };
 use super::{
     crlf, truncate_str, wrap_line, ActiveExec, ApprovalScope, Block, ConfirmChoice, RenderOut,
@@ -317,7 +317,7 @@ fn render_confirm_result(
         rows += 1;
         let _ = out.queue(Print("   "));
         match c {
-            ConfirmChoice::Yes => {
+            ConfirmChoice::Yes | ConfirmChoice::YesAutoApply => {
                 print_dim(out, "approved");
             }
             ConfirmChoice::Always(scope) => {
@@ -571,8 +571,8 @@ pub(crate) fn render_markdown_inner(
             for seg in &segments {
                 if let Some(b) = bctx {
                     b.print_left(out);
-                    print_styled_line(out, seg, dim);
-                    b.print_right(out, seg.chars().count());
+                    let cols = print_styled_line(out, seg, dim);
+                    b.print_right(out, cols);
                 } else {
                     let _ = out.queue(Print(indent));
                     print_styled_line(out, seg, dim);
@@ -588,8 +588,10 @@ pub(crate) fn render_markdown_inner(
 
 /// Render a single line with block-level detection (headings, blockquotes,
 /// list markers) then inline styling via the shared `print_inline_styled`.
-fn print_styled_line(out: &mut RenderOut, text: &str, dim: bool) {
+/// Returns the number of visible columns printed.
+fn print_styled_line(out: &mut RenderOut, text: &str, dim: bool) -> usize {
     use super::highlight::print_inline_styled;
+    use unicode_width::UnicodeWidthStr;
 
     macro_rules! reset {
         () => {
@@ -607,7 +609,7 @@ fn print_styled_line(out: &mut RenderOut, text: &str, dim: bool) {
         let _ = out.queue(SetAttribute(Attribute::Bold));
         let _ = out.queue(Print(trimmed));
         reset!();
-        return;
+        return trimmed.chars().count();
     }
 
     if trimmed.starts_with('>') {
@@ -616,7 +618,7 @@ fn print_styled_line(out: &mut RenderOut, text: &str, dim: bool) {
         let _ = out.queue(SetAttribute(Attribute::Italic));
         let _ = out.queue(Print(content));
         reset!();
-        return;
+        return content.chars().count();
     }
 
     // Split off list-item markers and print them dim.
@@ -633,6 +635,8 @@ fn print_styled_line(out: &mut RenderOut, text: &str, dim: bool) {
     }
 
     print_inline_styled(out, body, dim);
+    let visual = strip_markdown_markers(body).width();
+    leading_ws.chars().count() + prefix.chars().count() + visual
 }
 
 /// Split a list-item prefix (`- `, `* `, `1. `, etc.) from the line content.
@@ -705,7 +709,7 @@ fn render_plan_output(
     let fill = inner_w.saturating_sub(label.len()).saturating_add(1);
     let _ = out.queue(SetForegroundColor(theme::PLAN));
     let _ = out.queue(Print(format!(
-        "   \u{250c}\u{2500}{label}{}\u{2510}",
+        "  \u{250c}\u{2500}{label}{}\u{2510}",
         "\u{2500}".repeat(fill)
     )));
     let _ = out.queue(ResetColor);
@@ -714,7 +718,7 @@ fn render_plan_output(
 
     // Body: markdown rendering inside the plan box.
     let bctx = super::BoxContext {
-        left: "   \u{2502} ",
+        left: "  \u{2502} ",
         right: " \u{2502}",
         color: theme::PLAN,
         inner_w,
@@ -725,7 +729,7 @@ fn render_plan_output(
     // 3 + 1(└) + dashes + 1(┘) = 5 + inner_w + 2 → dashes = inner_w + 2
     let _ = out.queue(SetForegroundColor(theme::PLAN));
     let _ = out.queue(Print(format!(
-        "   \u{2514}{}\u{2518}",
+        "  \u{2514}{}\u{2518}",
         "\u{2500}".repeat(inner_w + 2)
     )));
     let _ = out.queue(ResetColor);

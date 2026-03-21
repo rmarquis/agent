@@ -55,6 +55,11 @@ pub async fn engine_task(
                         } else {
                             &config.permissions
                         };
+                        let system_prompt = crate::build_system_prompt(
+                            mode,
+                            &config.cwd,
+                            config.instructions.as_deref(),
+                        );
                         let mut turn = Turn {
                             provider,
                             registry: &registry,
@@ -71,7 +76,7 @@ pub async fn engine_task(
                             reasoning_effort,
                             turn_id,
                             model,
-                            system_prompt: &config.system_prompt,
+                            system_prompt,
                             session_id,
                             session_dir,
                         };
@@ -326,7 +331,7 @@ struct Turn<'a> {
     reasoning_effort: ReasoningEffort,
     turn_id: u64,
     model: String,
-    system_prompt: &'a str,
+    system_prompt: String,
     session_id: String,
     session_dir: PathBuf,
 }
@@ -391,7 +396,7 @@ impl<'a> Turn<'a> {
     /// Main agentic loop for a single turn.
     async fn run(&mut self, content: Content, history: Vec<Message>) {
         self.messages = Vec::with_capacity(history.len() + 2);
-        self.messages.push(Message::system(self.system_prompt));
+        self.messages.push(Message::system(&self.system_prompt));
         self.messages.extend(history);
 
         if !content.is_empty() {

@@ -53,7 +53,7 @@ pub struct EngineConfig {
     pub api_base: String,
     pub api_key: String,
     pub model_config: ModelConfig,
-    pub system_prompt: String,
+    pub instructions: Option<String>,
     pub cwd: PathBuf,
     pub permissions: Arc<Permissions>,
 }
