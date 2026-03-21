@@ -350,6 +350,8 @@ pub enum UiCommand {
     GenerateTitle {
         user_messages: Vec<String>,
         model: String,
+        api_base: Option<String>,
+        api_key: Option<String>,
     },
 
     /// Ask an ephemeral side question (no tools, not added to history).

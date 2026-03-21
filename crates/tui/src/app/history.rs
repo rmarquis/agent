@@ -336,6 +336,8 @@ impl App {
         self.engine.send(UiCommand::GenerateTitle {
             user_messages: recent,
             model: self.model.clone(),
+            api_base: Some(self.api_base.clone()),
+            api_key: Some(self.api_key()),
         });
     }
 

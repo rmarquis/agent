@@ -89,8 +89,8 @@ pub async fn engine_task(
                             }
                         }
                     }
-                    UiCommand::GenerateTitle { user_messages, model } => {
-                        spawn_title_generation(&config, &client, &model, user_messages, &event_tx);
+                    UiCommand::GenerateTitle { user_messages, model, api_base, api_key } => {
+                        spawn_title_generation(&config, &client, &model, user_messages, api_base, api_key, &event_tx);
                     }
                     UiCommand::Btw { question, history, model, reasoning_effort, api_base, api_key } => {
                         spawn_btw_request(&config, &client, &model, reasoning_effort, question, history, api_base, api_key, &event_tx);
@@ -120,9 +120,11 @@ fn spawn_title_generation(
     client: &reqwest::Client,
     model: &str,
     user_messages: Vec<String>,
+    api_base: Option<String>,
+    api_key: Option<String>,
     event_tx: &mpsc::UnboundedSender<EngineEvent>,
 ) {
-    let provider = build_provider(config, client);
+    let provider = build_provider_with_overrides(config, client, api_base.as_deref(), api_key.as_deref());
     let model = model.to_string();
     let tx = event_tx.clone();
     tokio::spawn(async move {
@@ -346,12 +348,16 @@ impl<'a> Turn<'a> {
             UiCommand::GenerateTitle {
                 user_messages,
                 model,
+                api_base,
+                api_key,
             } => {
                 spawn_title_generation(
                     self.config,
                     self.http_client,
                     &model,
                     user_messages,
+                    api_base,
+                    api_key,
                     self.event_tx,
                 );
                 true
