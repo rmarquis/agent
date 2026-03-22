@@ -51,6 +51,11 @@ pub enum KeyAction {
     KillToEndOfLine,
     KillToStartOfLine,
     Yank,
+    YankPop,
+    UppercaseWord,
+    LowercaseWord,
+    CapitalizeWord,
+    Undo,
 
     // Vim-specific (only active in vim normal mode)
     VimHalfPageUp,
@@ -354,6 +359,36 @@ static BINDINGS: &[Binding] = &[
         when().not_vim_normal(),
         KeyAction::Yank,
     ),
+    bind(
+        KeyCode::Char('y'),
+        ALT,
+        when().not_vim_normal(),
+        KeyAction::YankPop,
+    ),
+    bind(
+        KeyCode::Char('u'),
+        ALT,
+        when().not_vim_normal(),
+        KeyAction::UppercaseWord,
+    ),
+    bind(
+        KeyCode::Char('l'),
+        ALT,
+        when().not_vim_normal(),
+        KeyAction::LowercaseWord,
+    ),
+    bind(
+        KeyCode::Char('c'),
+        ALT,
+        when().not_vim_normal(),
+        KeyAction::CapitalizeWord,
+    ),
+    bind(
+        KeyCode::Char('_'),
+        CTRL,
+        when().not_vim_normal(),
+        KeyAction::Undo,
+    ),
     // ── Arrow / Home / End navigation ───────────────────────────────────
     bind(KeyCode::Left, ALT, when(), KeyAction::MoveWordBackward),
     bind(KeyCode::Left, SUPER, when(), KeyAction::MoveStartOfLine),
@@ -545,7 +580,12 @@ pub mod hints {
         ("ctrl+u / ctrl+d", "scroll up / down  (half page)"),
         ("ctrl+a / ctrl+e", "line start / end"),
         ("ctrl+k / ctrl+w", "kill to end / delete word"),
-        ("ctrl+y", "yank (paste killed text)"),
+        ("ctrl+y / alt+y", "yank / yank-pop (cycle kill ring)"),
+        (
+            "alt+u / alt+l / alt+c",
+            "uppercase / lowercase / capitalize word",
+        ),
+        ("ctrl+_", "undo"),
         ("tab", "autocomplete / accept ghost text"),
         ("esc  esc esc", "dismiss / cancel agent / rewind"),
     ];

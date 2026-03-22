@@ -44,6 +44,14 @@ pub struct InputState {
     from_paste: bool,
     /// Kill ring for Ctrl+K / Ctrl+U / Ctrl+Y (emacs-style kill/yank).
     kill_ring: String,
+    /// Previous kills for M-y yank-pop cycling.
+    kill_history: Vec<String>,
+    /// Range of the last yank insertion (start, end) for yank-pop replacement.
+    last_yank: Option<(usize, usize)>,
+    /// Current index into kill_history during yank-pop cycling.
+    yank_pop_idx: usize,
+    /// Undo stack for non-vim mode.
+    undo_stack: Vec<(String, usize, Vec<AttachmentId>)>,
     /// Completable arguments for commands like `/model`, `/theme`, `/color`.
     /// Each entry is `("/cmd", vec!["arg1", "arg2", ...])`.
     pub command_arg_sources: Vec<(String, Vec<String>)>,
@@ -82,6 +90,10 @@ impl InputState {
             stash: None,
             from_paste: false,
             kill_ring: String::new(),
+            kill_history: Vec::new(),
+            last_yank: None,
+            yank_pop_idx: 0,
+            undo_stack: Vec::new(),
             command_arg_sources: Vec::new(),
         }
     }
@@ -461,6 +473,9 @@ impl InputState {
         action: KeyAction,
         history: Option<&mut History>,
     ) -> Action {
+        if !matches!(action, KeyAction::Yank | KeyAction::YankPop) {
+            self.last_yank = None;
+        }
         match action {
             // ── Actions the caller must handle ──────────────────────────
             KeyAction::Quit => Action::Noop,        // caller checks
@@ -584,12 +599,12 @@ impl InputState {
                 Action::Redraw
             }
             KeyAction::DeleteCharForward => {
-                self.vim_save_undo();
+                self.save_undo();
                 self.delete_char_forward();
                 Action::Redraw
             }
             KeyAction::DeleteWordBackward => {
-                self.vim_save_undo();
+                self.save_undo();
                 self.delete_word_backward();
                 Action::Redraw
             }
@@ -602,18 +617,41 @@ impl InputState {
                 Action::Redraw
             }
             KeyAction::KillToEndOfLine => {
-                self.vim_save_undo();
+                self.save_undo();
                 self.kill_to_end_of_line();
                 Action::Redraw
             }
             KeyAction::KillToStartOfLine => {
-                self.vim_save_undo();
+                self.save_undo();
                 self.kill_to_start_of_line();
                 Action::Redraw
             }
             KeyAction::Yank => {
-                self.vim_save_undo();
+                self.save_undo();
                 self.yank();
+                Action::Redraw
+            }
+            KeyAction::YankPop => {
+                self.yank_pop();
+                Action::Redraw
+            }
+            KeyAction::UppercaseWord => {
+                self.save_undo();
+                self.uppercase_word();
+                Action::Redraw
+            }
+            KeyAction::LowercaseWord => {
+                self.save_undo();
+                self.lowercase_word();
+                Action::Redraw
+            }
+            KeyAction::CapitalizeWord => {
+                self.save_undo();
+                self.capitalize_word();
+                Action::Redraw
+            }
+            KeyAction::Undo => {
+                self.undo();
                 Action::Redraw
             }
 
@@ -637,9 +675,7 @@ impl InputState {
             // ── Clipboard ───────────────────────────────────────────────
             KeyAction::ClipboardImage => {
                 if let Some(url) = clipboard_image_to_data_url() {
-                    if let Some(ref mut vim) = self.vim {
-                        vim.save_undo(&self.buf, self.cpos, &self.attachment_ids);
-                    }
+                    self.save_undo();
                     self.insert_image("clipboard.png".into(), url);
                     Action::Redraw
                 } else {
@@ -713,9 +749,7 @@ impl InputState {
 
         // Paste events (not key events — handled before keymap).
         if let Event::Paste(data) = ev {
-            if let Some(ref mut vim) = self.vim {
-                vim.save_undo(&self.buf, self.cpos, &self.attachment_ids);
-            }
+            self.save_undo();
             if let Some(path) = engine::image::normalize_pasted_path(&data) {
                 if engine::image::is_image_file(&path) {
                     match engine::image::read_image_as_data_url(&path) {
@@ -732,9 +766,6 @@ impl InputState {
             }
             if data.trim().is_empty() {
                 if let Some(url) = clipboard_image_to_data_url() {
-                    if let Some(ref mut vim) = self.vim {
-                        vim.save_undo(&self.buf, self.cpos, &self.attachment_ids);
-                    }
                     self.insert_image("clipboard.png".into(), url);
                     return Action::Redraw;
                 }
@@ -1151,10 +1182,16 @@ impl InputState {
         }
     }
 
-    /// Save vim undo state if vim is enabled.
-    fn vim_save_undo(&mut self) {
+    /// Save undo state before an editing operation.
+    fn save_undo(&mut self) {
         if let Some(ref mut vim) = self.vim {
             vim.save_undo(&self.buf, self.cpos, &self.attachment_ids);
+        } else {
+            self.undo_stack
+                .push((self.buf.clone(), self.cpos, self.attachment_ids.clone()));
+            if self.undo_stack.len() > 100 {
+                self.undo_stack.remove(0);
+            }
         }
     }
 
@@ -1256,7 +1293,7 @@ impl InputState {
             .find('\n')
             .map(|i| self.cpos + i)
             .unwrap_or(self.buf.len());
-        self.kill_ring = self.buf[self.cpos..end].to_string();
+        let killed = self.buf[self.cpos..end].to_string();
         let markers_before = self.buf[..self.cpos]
             .chars()
             .filter(|&c| c == ATTACHMENT_MARKER)
@@ -1272,6 +1309,7 @@ impl InputState {
             }
         }
         self.buf.drain(self.cpos..end);
+        self.push_kill(killed);
         self.recompute_completer();
     }
 
@@ -1280,7 +1318,7 @@ impl InputState {
             .rfind('\n')
             .map(|i| i + 1)
             .unwrap_or(0);
-        self.kill_ring = self.buf[start..self.cpos].to_string();
+        let killed = self.buf[start..self.cpos].to_string();
         let markers_before = self.buf[..start]
             .chars()
             .filter(|&c| c == ATTACHMENT_MARKER)
@@ -1297,6 +1335,7 @@ impl InputState {
         }
         self.buf.drain(start..self.cpos);
         self.cpos = start;
+        self.push_kill(killed);
         self.recompute_completer();
     }
 
@@ -1324,12 +1363,100 @@ impl InputState {
         self.recompute_completer();
     }
 
+    fn push_kill(&mut self, text: String) {
+        if text.is_empty() {
+            return;
+        }
+        if !self.kill_ring.is_empty() {
+            self.kill_history
+                .insert(0, std::mem::take(&mut self.kill_ring));
+            if self.kill_history.len() > 32 {
+                self.kill_history.pop();
+            }
+        }
+        self.kill_ring = text;
+        self.last_yank = None;
+    }
+
     fn yank(&mut self) {
         if !self.kill_ring.is_empty() {
+            let start = self.cpos;
             self.buf.insert_str(self.cpos, &self.kill_ring);
             self.cpos += self.kill_ring.len();
+            self.last_yank = Some((start, self.cpos));
+            self.yank_pop_idx = 0;
             self.recompute_completer();
         }
+    }
+
+    fn yank_pop(&mut self) {
+        let Some((start, end)) = self.last_yank else {
+            return;
+        };
+        if self.kill_history.is_empty() {
+            return;
+        }
+        let text = &self.kill_history[self.yank_pop_idx % self.kill_history.len()];
+        let new_end = start + text.len();
+        self.buf.replace_range(start..end, text);
+        self.cpos = new_end;
+        self.last_yank = Some((start, new_end));
+        self.yank_pop_idx = (self.yank_pop_idx + 1) % self.kill_history.len();
+        self.recompute_completer();
+    }
+
+    fn uppercase_word(&mut self) {
+        let end = vim::word_forward_pos(&self.buf, self.cpos, vim::CharClass::Word);
+        if end == self.cpos {
+            return;
+        }
+        let upper: String = self.buf[self.cpos..end].to_uppercase();
+        self.buf.replace_range(self.cpos..end, &upper);
+        self.cpos += upper.len();
+        self.recompute_completer();
+    }
+
+    fn lowercase_word(&mut self) {
+        let end = vim::word_forward_pos(&self.buf, self.cpos, vim::CharClass::Word);
+        if end == self.cpos {
+            return;
+        }
+        let lower: String = self.buf[self.cpos..end].to_lowercase();
+        self.buf.replace_range(self.cpos..end, &lower);
+        self.cpos += lower.len();
+        self.recompute_completer();
+    }
+
+    fn capitalize_word(&mut self) {
+        let end = vim::word_forward_pos(&self.buf, self.cpos, vim::CharClass::Word);
+        if end == self.cpos {
+            return;
+        }
+        let word = &self.buf[self.cpos..end];
+        let mut cap = String::with_capacity(word.len());
+        let mut first = true;
+        for c in word.chars() {
+            if first && c.is_alphabetic() {
+                cap.extend(c.to_uppercase());
+                first = false;
+            } else {
+                cap.push(c);
+            }
+        }
+        self.buf.replace_range(self.cpos..end, &cap);
+        self.cpos += cap.len();
+        self.recompute_completer();
+    }
+
+    fn undo(&mut self) {
+        if let Some(ref mut vim) = self.vim {
+            vim.undo(&mut self.buf, &mut self.cpos, &mut self.attachment_ids);
+        } else if let Some((buf, cpos, att)) = self.undo_stack.pop() {
+            self.buf = buf;
+            self.cpos = cpos;
+            self.attachment_ids = att;
+        }
+        self.recompute_completer();
     }
 
     fn move_word_forward(&mut self) -> bool {
