@@ -973,7 +973,11 @@ impl InputState {
                     }
                     self.history_saved_buf = None;
                 } else {
+                    let was_command = comp.kind == CompleterKind::Command;
                     self.accept_completion(&comp);
+                    if was_command {
+                        self.sync_completer();
+                    }
                 }
                 Some(Action::Redraw)
             }
