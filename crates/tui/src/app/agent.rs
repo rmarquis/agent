@@ -226,6 +226,13 @@ impl App {
                 }
             }
         }
+        let meta = self
+            .pending_turn_meta
+            .take()
+            .or_else(|| self.screen.turn_meta());
+        if let Some(meta) = meta {
+            self.turn_metas.push((self.history.len(), meta));
+        }
         self.snapshot_tokens();
         self.save_session();
         state::set_mode(self.mode);
@@ -302,7 +309,9 @@ impl App {
                 *pending = Some(PendingTool { name: tool_name });
                 SessionControl::Continue
             }
-            EngineEvent::ToolFinished { result, .. } => {
+            EngineEvent::ToolFinished {
+                result, elapsed_ms, ..
+            } => {
                 if pending.is_some() {
                     let status = if result.is_error {
                         ToolStatus::Err
@@ -313,7 +322,8 @@ impl App {
                         content: result.content,
                         is_error: result.is_error,
                     });
-                    self.screen.finish_tool(status, output);
+                    let elapsed = elapsed_ms.map(Duration::from_millis);
+                    self.screen.finish_tool(status, output, elapsed);
                 }
                 *pending = None;
                 self.screen
@@ -383,12 +393,13 @@ impl App {
             EngineEvent::TurnComplete {
                 turn_id: id,
                 messages,
+                meta,
             } => {
                 if id != turn_id {
-                    // Stale event from a previous (cancelled) turn — ignore.
                     return SessionControl::Continue;
                 }
                 self.set_history(messages);
+                self.pending_turn_meta = meta;
                 SessionControl::Done
             }
             EngineEvent::TurnError { message } => {
@@ -747,7 +758,7 @@ impl App {
                     approved: false,
                     message,
                 });
-                self.screen.finish_tool(ToolStatus::Denied, None);
+                self.screen.finish_tool(ToolStatus::Denied, None, None);
                 if has_message {
                     // Deny with feedback — let the agent continue with the message.
                     // Clear pending so the engine's ToolFinished event doesn't
@@ -804,7 +815,7 @@ impl App {
                     request_id,
                     answer: None,
                 });
-                self.screen.finish_tool(ToolStatus::Denied, None);
+                self.screen.finish_tool(ToolStatus::Denied, None, None);
                 if let Some(ref mut ag) = agent {
                     ag.pending = None;
                 }

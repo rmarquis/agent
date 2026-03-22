@@ -4,12 +4,13 @@ use crate::provider::{self, Provider, ProviderError, ToolDefinition};
 use crate::tools::{self, ToolContext, ToolRegistry, ToolResult};
 use crate::EngineConfig;
 use protocol::{
-    Content, EngineEvent, Message, Mode, ReasoningEffort, Role, ToolOutcome, UiCommand,
+    Content, EngineEvent, Message, Mode, ReasoningEffort, Role, ToolOutcome, TurnMeta, UiCommand,
 };
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 use tokio::sync::mpsc;
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
@@ -79,6 +80,9 @@ pub async fn engine_task(
                             system_prompt,
                             session_id,
                             session_dir,
+                            started_at: Instant::now(),
+                            tps_samples: Vec::new(),
+                            tool_elapsed: HashMap::new(),
                         };
                         turn.run(input_content, history).await;
                     }
@@ -334,11 +338,40 @@ struct Turn<'a> {
     system_prompt: String,
     session_id: String,
     session_dir: PathBuf,
+    started_at: Instant,
+    tps_samples: Vec<f64>,
+    tool_elapsed: HashMap<String, u64>,
 }
 
 impl<'a> Turn<'a> {
     fn emit(&self, event: EngineEvent) {
         let _ = self.event_tx.send(event);
+    }
+
+    fn emit_turn_complete(&mut self, interrupted: bool) {
+        let meta = self.build_meta(interrupted);
+        self.messages.remove(0);
+        let msgs = std::mem::take(&mut self.messages);
+        self.emit(EngineEvent::TurnComplete {
+            turn_id: self.turn_id,
+            messages: msgs,
+            meta: Some(meta),
+        });
+    }
+
+    fn build_meta(&self, interrupted: bool) -> TurnMeta {
+        let avg_tps = if self.tps_samples.is_empty() {
+            None
+        } else {
+            let sum: f64 = self.tps_samples.iter().sum();
+            Some(sum / self.tps_samples.len() as f64)
+        };
+        TurnMeta {
+            elapsed_ms: self.started_at.elapsed().as_millis() as u64,
+            avg_tps,
+            interrupted,
+            tool_elapsed: self.tool_elapsed.clone(),
+        }
     }
 
     fn apply_model_change(&mut self, model: String, api_base: String, api_key: String) {
@@ -419,12 +452,7 @@ impl<'a> Turn<'a> {
                 self.registry.definitions(self.permissions, self.mode);
 
             if self.cancel.is_cancelled() {
-                self.messages.remove(0);
-                let msgs = std::mem::take(&mut self.messages);
-                self.emit(EngineEvent::TurnComplete {
-                    turn_id: self.turn_id,
-                    messages: msgs,
-                });
+                self.emit_turn_complete(true);
                 return;
             }
 
@@ -432,12 +460,7 @@ impl<'a> Turn<'a> {
             let resp = match self.call_llm(&tool_defs).await {
                 Ok(r) => r,
                 Err(ProviderError::Cancelled) => {
-                    self.messages.remove(0);
-                    let msgs = std::mem::take(&mut self.messages);
-                    self.emit(EngineEvent::TurnComplete {
-                        turn_id: self.turn_id,
-                        messages: msgs,
-                    });
+                    self.emit_turn_complete(true);
                     return;
                 }
                 Err(e) => {
@@ -448,12 +471,7 @@ impl<'a> Turn<'a> {
                     );
                     // Send final history so the TUI can persist tool results
                     // accumulated before the error.
-                    self.messages.remove(0);
-                    let msgs = std::mem::take(&mut self.messages);
-                    self.emit(EngineEvent::TurnComplete {
-                        turn_id: self.turn_id,
-                        messages: msgs,
-                    });
+                    self.emit_turn_complete(false);
                     self.emit(EngineEvent::TurnError {
                         message: e.to_string(),
                     });
@@ -463,6 +481,9 @@ impl<'a> Turn<'a> {
 
             if let Some(tokens) = resp.prompt_tokens {
                 let tokens_per_sec = resp.tokens_per_sec;
+                if let Some(tps) = tokens_per_sec {
+                    self.tps_samples.push(tps);
+                }
                 self.emit(EngineEvent::TokenUsage {
                     prompt_tokens: tokens,
                     completion_tokens: resp.completion_tokens,
@@ -514,12 +535,7 @@ impl<'a> Turn<'a> {
 
                 self.messages
                     .push(Message::assistant(content, reasoning, None));
-                self.messages.remove(0);
-                let msgs = std::mem::take(&mut self.messages);
-                self.emit(EngineEvent::TurnComplete {
-                    turn_id: self.turn_id,
-                    messages: msgs,
-                });
+                self.emit_turn_complete(false);
                 return;
             }
 
@@ -541,6 +557,7 @@ impl<'a> Turn<'a> {
                     serde_json::from_str(&tc.function.arguments).unwrap_or_default();
 
                 let summary = tools::tool_arg_summary(&tc.function.name, &args);
+                let tool_start = Instant::now();
                 self.emit(EngineEvent::ToolStarted {
                     call_id: tc.id.clone(),
                     tool_name: tc.function.name.clone(),
@@ -555,6 +572,7 @@ impl<'a> Turn<'a> {
                             &tc.id,
                             &format!("unknown tool: {}", tc.function.name),
                             true,
+                            Some(tool_start),
                         );
                         continue;
                     }
@@ -565,7 +583,7 @@ impl<'a> Turn<'a> {
                 {
                     PermissionResult::Allow(msg) => msg,
                     PermissionResult::Deny(denial) => {
-                        self.push_tool_result(&tc.id, &denial, false);
+                        self.push_tool_result(&tc.id, &denial, false, None);
                         continue;
                     }
                 };
@@ -600,6 +618,8 @@ impl<'a> Turn<'a> {
                     }),
                 );
 
+                let elapsed_ms = tool_start.elapsed().as_millis() as u64;
+                self.tool_elapsed.insert(tc.id.clone(), elapsed_ms);
                 let mut tool_content = content.clone();
                 if let Some(ref msg) = confirm_msg {
                     tool_content.push_str(&format!("\n\nUser message: {msg}"));
@@ -609,6 +629,7 @@ impl<'a> Turn<'a> {
                 self.emit(EngineEvent::ToolFinished {
                     call_id: tc.id.clone(),
                     result: ToolOutcome { content, is_error },
+                    elapsed_ms: Some(elapsed_ms),
                 });
             }
         }
@@ -846,7 +867,13 @@ impl<'a> Turn<'a> {
         }
     }
 
-    fn push_tool_result(&mut self, tool_call_id: &str, content: &str, is_error: bool) {
+    fn push_tool_result(
+        &mut self,
+        tool_call_id: &str,
+        content: &str,
+        is_error: bool,
+        started_at: Option<Instant>,
+    ) {
         self.messages
             .push(Message::tool(tool_call_id.to_string(), content, is_error));
         self.emit(EngineEvent::ToolFinished {
@@ -855,6 +882,7 @@ impl<'a> Turn<'a> {
                 content: content.to_string(),
                 is_error,
             },
+            elapsed_ms: started_at.map(|t| t.elapsed().as_millis() as u64),
         });
     }
 }

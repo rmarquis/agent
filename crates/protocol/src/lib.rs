@@ -213,6 +213,7 @@ pub enum EngineEvent {
     ToolFinished {
         call_id: String,
         result: ToolOutcome,
+        elapsed_ms: Option<u64>,
     },
 
     /// Engine needs user permission before executing a tool.
@@ -267,6 +268,7 @@ pub enum EngineEvent {
     TurnComplete {
         turn_id: u64,
         messages: Vec<Message>,
+        meta: Option<TurnMeta>,
     },
 
     /// The agent turn ended with an error.
@@ -559,6 +561,17 @@ impl<'de> Deserialize<'de> for AlwaysFunction {
 pub struct ToolOutcome {
     pub content: String,
     pub is_error: bool,
+}
+
+/// Per-turn metadata emitted by the engine at turn completion.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TurnMeta {
+    pub elapsed_ms: u64,
+    pub avg_tps: Option<f64>,
+    pub interrupted: bool,
+    /// Per-tool-call elapsed times, keyed by call_id.
+    #[serde(default)]
+    pub tool_elapsed: HashMap<String, u64>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

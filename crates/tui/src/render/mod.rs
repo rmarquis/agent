@@ -805,13 +805,17 @@ impl Screen {
         }
     }
 
-    pub fn finish_tool(&mut self, status: ToolStatus, output: Option<ToolOutput>) {
+    pub fn finish_tool(
+        &mut self,
+        status: ToolStatus,
+        output: Option<ToolOutput>,
+        engine_elapsed: Option<Duration>,
+    ) {
         if let Some(tool) = self.active_tool.take() {
-            // Don't show elapsed time for denied tools - they never actually ran.
             let elapsed = if status == ToolStatus::Denied {
                 None
             } else {
-                tool.elapsed()
+                engine_elapsed.or_else(|| tool.elapsed())
             };
             self.history.push(Block::ToolCall {
                 name: tool.name,
@@ -906,6 +910,15 @@ impl Screen {
 
     pub fn record_tokens_per_sec(&mut self, tps: f64) {
         self.working.record_tokens_per_sec(tps);
+        self.prompt.dirty = true;
+    }
+
+    pub fn turn_meta(&self) -> Option<protocol::TurnMeta> {
+        self.working.turn_meta()
+    }
+
+    pub fn restore_from_turn_meta(&mut self, meta: &protocol::TurnMeta) {
+        self.working.restore_from_turn_meta(meta);
         self.prompt.dirty = true;
     }
 

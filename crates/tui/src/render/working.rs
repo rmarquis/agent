@@ -2,6 +2,7 @@ use super::{BarSpan, Throbber, SPINNER_FRAMES};
 use crate::theme;
 use crate::utils::format_duration;
 use crossterm::style::{Attribute, Color};
+use protocol::TurnMeta;
 use std::time::{Duration, Instant};
 
 pub(super) struct WorkingState {
@@ -56,6 +57,33 @@ impl WorkingState {
         }
         let sum: f64 = self.tps_samples.iter().sum();
         Some(sum / self.tps_samples.len() as f64)
+    }
+
+    pub fn turn_meta(&self) -> Option<TurnMeta> {
+        let throbber = self.throbber?;
+        let elapsed = match throbber {
+            Throbber::Done | Throbber::Interrupted => self.final_elapsed?,
+            _ => self.since?.elapsed(),
+        };
+        Some(TurnMeta {
+            elapsed_ms: elapsed.as_millis() as u64,
+            avg_tps: self.avg_tokens_per_sec(),
+            interrupted: matches!(throbber, Throbber::Interrupted),
+            tool_elapsed: std::collections::HashMap::new(),
+        })
+    }
+
+    pub fn restore_from_turn_meta(&mut self, meta: &TurnMeta) {
+        self.final_elapsed = Some(Duration::from_millis(meta.elapsed_ms));
+        self.tps_samples.clear();
+        if let Some(tps) = meta.avg_tps {
+            self.tps_samples.push(tps);
+        }
+        self.throbber = Some(if meta.interrupted {
+            Throbber::Interrupted
+        } else {
+            Throbber::Done
+        });
     }
 
     pub fn clear(&mut self) {

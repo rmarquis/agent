@@ -36,6 +36,7 @@ impl App {
         self.engine.send(UiCommand::Cancel);
         self.history.clear();
         self.token_snapshots.clear();
+        self.turn_metas.clear();
         self.reset_session_permissions();
         self.queued_messages.clear();
         self.screen.clear();
@@ -82,6 +83,7 @@ impl App {
         self.token_snapshots = self.session.token_snapshots.clone();
         self.token_snapshots
             .retain(|(len, _)| *len <= self.history.len());
+        self.turn_metas = self.session.turn_metas.clone();
         self.reset_session_permissions();
         self.queued_messages.clear();
         self.input.clear();
@@ -167,6 +169,7 @@ impl App {
         }
 
         let mut tool_outputs: HashMap<String, ToolOutput> = HashMap::new();
+        let mut tool_elapsed: HashMap<String, u64> = HashMap::new();
         for msg in &self.history {
             if matches!(msg.role, Role::Tool) {
                 if let Some(ref id) = msg.tool_call_id {
@@ -184,6 +187,9 @@ impl App {
                     );
                 }
             }
+        }
+        for (_, meta) in &self.turn_metas {
+            tool_elapsed.extend(meta.tool_elapsed.iter().map(|(k, v)| (k.clone(), *v)));
         }
 
         for msg in &self.history {
@@ -255,12 +261,15 @@ impl App {
                             } else {
                                 ToolStatus::Pending
                             };
+                            let elapsed = tool_elapsed
+                                .get(&tc.id)
+                                .map(|ms| Duration::from_millis(*ms));
                             self.screen.push(Block::ToolCall {
                                 name: tc.function.name.clone(),
                                 summary,
                                 args,
                                 status,
-                                elapsed: None,
+                                elapsed,
                                 output,
                                 user_message: None,
                             });
@@ -271,6 +280,10 @@ impl App {
                 Role::System => {}
             }
         }
+
+        if let Some((_, meta)) = self.turn_metas.last() {
+            self.screen.restore_from_turn_meta(meta);
+        }
     }
 
     pub fn save_session(&mut self) {
@@ -280,6 +293,7 @@ impl App {
         }
         self.session.messages = self.history.clone();
         self.session.token_snapshots = self.token_snapshots.clone();
+        self.session.turn_metas = self.turn_metas.clone();
         self.session.updated_at_ms = session::now_ms();
         self.session.mode = Some(self.mode.as_str().to_string());
         self.session.reasoning_effort = Some(self.reasoning_effort);
@@ -441,14 +455,8 @@ impl App {
             .unwrap_or_default();
 
         self.history.truncate(hist_idx);
-        // Restore the most recent token snapshot at or before the truncation point.
-        while self
-            .token_snapshots
-            .last()
-            .is_some_and(|(len, _)| *len > hist_idx)
-        {
-            self.token_snapshots.pop();
-        }
+        truncate_keyed(&mut self.token_snapshots, hist_idx);
+        truncate_keyed(&mut self.turn_metas, hist_idx);
         if let Some(&(_, tokens)) = self.token_snapshots.last() {
             self.screen.set_context_tokens(tokens);
         } else {
@@ -468,5 +476,12 @@ impl App {
             text: input.to_string(),
             image_labels,
         });
+    }
+}
+
+/// Drop entries whose history-length key exceeds `hist_idx`.
+fn truncate_keyed<T>(snapshots: &mut Vec<(usize, T)>, hist_idx: usize) {
+    while snapshots.last().is_some_and(|(len, _)| *len > hist_idx) {
+        snapshots.pop();
     }
 }

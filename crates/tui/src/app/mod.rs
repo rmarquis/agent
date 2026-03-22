@@ -84,6 +84,10 @@ pub struct App {
     /// and before each compaction. On rewind, the most recent snapshot at or
     /// before the truncation point is restored.
     token_snapshots: Vec<(usize, u32)>,
+    /// Per-turn metadata (elapsed, tps, status) keyed by history length.
+    turn_metas: Vec<(usize, protocol::TurnMeta)>,
+    /// TurnMeta from the engine, consumed by `finish_turn`.
+    pending_turn_meta: Option<protocol::TurnMeta>,
 }
 
 /// Retained subset of the confirm request for mode-toggle re-checks.
@@ -378,6 +382,8 @@ impl App {
             compact_epoch: 0,
             pending_compact_epoch: 0,
             token_snapshots: Vec::new(),
+            turn_metas: Vec::new(),
+            pending_turn_meta: None,
         }
     }
 

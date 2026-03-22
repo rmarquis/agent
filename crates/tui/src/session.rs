@@ -1,5 +1,5 @@
 use crate::config;
-use protocol::{Message, ReasoningEffort};
+use protocol::{Message, ReasoningEffort, TurnMeta};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -41,6 +41,10 @@ pub struct Session {
     pub context_tokens: Option<u32>,
     #[serde(default)]
     pub token_snapshots: Vec<(usize, u32)>,
+    /// Per-turn metadata keyed by history length at capture time, parallel
+    /// to `token_snapshots`.
+    #[serde(default)]
+    pub turn_metas: Vec<(usize, TurnMeta)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,6 +102,7 @@ impl Session {
             messages: Vec::new(),
             context_tokens: None,
             token_snapshots: Vec::new(),
+            turn_metas: Vec::new(),
         }
     }
 
@@ -136,6 +141,7 @@ impl Session {
             messages: self.messages.clone(),
             context_tokens: self.context_tokens,
             token_snapshots: self.token_snapshots.clone(),
+            turn_metas: self.turn_metas.clone(),
         }
     }
 }
