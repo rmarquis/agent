@@ -82,14 +82,36 @@ pub fn list() -> Vec<(String, String)> {
     items
 }
 
-/// Resolve a slash-command input (e.g. "/commit") to a parsed CustomCommand.
+/// Resolve a slash-command input (e.g. "/commit" or "/commit fix typos") to a
+/// parsed CustomCommand.  Any text after the command name is appended to the
+/// body as extra user instructions.
 pub fn resolve(input: &str) -> Option<CustomCommand> {
-    let name = input.strip_prefix('/')?;
+    let after_slash = input.strip_prefix('/')?;
+    let name = after_slash.split_whitespace().next()?;
     if name.is_empty() || name.contains('/') || name.contains('.') {
         return None;
     }
+    let extra = after_slash[name.len()..].trim();
     let path = commands_dir().join(format!("{name}.md"));
-    parse_command(&path, name)
+    let mut cmd = parse_command(&path, name)?;
+    if !extra.is_empty() {
+        cmd.body.push_str("\n\n");
+        cmd.body.push_str(extra);
+    }
+    Some(cmd)
+}
+
+/// Check whether `input` (e.g. "/commit") matches a custom command name,
+/// ignoring any trailing arguments.
+pub fn is_custom_command(input: &str) -> bool {
+    let name = input
+        .strip_prefix('/')
+        .and_then(|s| s.split_whitespace().next())
+        .unwrap_or("");
+    if name.is_empty() || name.contains('/') || name.contains('.') {
+        return false;
+    }
+    commands_dir().join(format!("{name}.md")).exists()
 }
 
 fn parse_command(path: &Path, name: &str) -> Option<CustomCommand> {

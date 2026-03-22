@@ -55,7 +55,7 @@ impl Completer {
         Self::command_items()
             .iter()
             .any(|(label, _)| *label == slash_name)
-            || crate::custom_commands::resolve(s).is_some()
+            || crate::custom_commands::is_custom_command(s)
     }
 
     /// Returns the argument hint for a command that accepts arguments.
@@ -79,6 +79,9 @@ impl Completer {
                         let hint = format!("<{}>", items.join("|"));
                         return Some((prefix.clone(), hint));
                     }
+                }
+                if crate::custom_commands::is_custom_command(cmd) {
+                    return Some((cmd.into(), "<instructions>".into()));
                 }
                 None
             }
