@@ -970,17 +970,11 @@ impl Screen {
         }
     }
 
-    /// Gap (in rows) between the last content element and the prompt.
-    fn prompt_gap(&self) -> u16 {
-        if self.active_exec.is_some() {
-            gap_between(&Element::ActiveExec, &Element::Prompt)
-        } else if self.active_tool.is_some() {
-            gap_between(&Element::ActiveTool, &Element::Prompt)
-        } else {
-            self.history.blocks.last().map_or(0, |last| {
-                gap_between(&Element::Block(last), &Element::Prompt)
-            })
-        }
+    /// Whether any content (blocks, active tool, active exec) exists above
+    /// the prompt.  Used to decide whether to emit a 1-line gap before the
+    /// prompt bar.
+    fn has_content(&self) -> bool {
+        !self.history.blocks.is_empty() || self.active_tool.is_some() || self.active_exec.is_some()
     }
 
     pub fn render_pending_blocks(&mut self) {
@@ -1006,7 +1000,7 @@ impl Screen {
                 .unwrap_or_else(|| cursor::position().map(|(_, y)| y).unwrap_or(0))
         };
         let block_rows = self.history.render(&mut out, term_width());
-        self.prompt.anchor_row = Some(start_row + block_rows + self.prompt_gap());
+        self.prompt.anchor_row = Some(start_row + block_rows);
         let _ = out.queue(terminal::EndSynchronizedUpdate);
         let _ = out.flush();
     }
@@ -1071,16 +1065,12 @@ impl Screen {
         self.prompt.drawn = false;
         self.prompt.dirty = true;
         self.prompt.prev_rows = 0;
-        // Account for the gap between the last block and the prompt so that
-        // draw_frame (which sees block_rows=0 since everything is flushed)
-        // positions the prompt correctly.
-        let gap = self.prompt_gap();
         if purge {
             self.has_scrollback = false;
             self.content_start_row = Some(0);
-            self.prompt.anchor_row = Some(block_rows + gap);
+            self.prompt.anchor_row = Some(block_rows);
         } else {
-            self.prompt.anchor_row = Some(start + block_rows + gap);
+            self.prompt.anchor_row = Some(start + block_rows);
         }
     }
 
@@ -1248,17 +1238,10 @@ impl Screen {
 
         if let Some(p) = prompt {
             // ── Full mode: render prompt ────────────────────────────────
-            // Only emit the gap when blocks were actually rendered this
-            // frame (block_rows > 0).  When block_rows is 0 the gap is
-            // already baked into anchor_row by render_pending_blocks /
-            // redraw, so adding it again would double-count.  It also
-            // avoids a stray blank line when the prompt is fullscreen.
-            let gap = if block_rows > 0 || self.active_tool.is_some() || self.active_exec.is_some()
-            {
-                self.prompt_gap()
-            } else {
-                0
-            };
+            // Emit a single blank-line gap when there is any content above
+            // the prompt.  anchor_row always points to the end of content
+            // (never includes the gap), so we emit it unconditionally here.
+            let gap: u16 = if self.has_content() { 1 } else { 0 };
             for _ in 0..gap {
                 crlf(&mut out);
             }
@@ -1283,15 +1266,15 @@ impl Screen {
             }
             self.prompt.prev_rows = (pre_prompt - block_rows) + new_rows;
 
-            // anchor_row: where the next frame starts drawing (prompt section).
-            // When blocks overflow, top_row + block_rows overshoots — compute
-            // from the bottom of the viewport instead.
+            // anchor_row: where the next frame starts drawing.  Points to
+            // the end of flushed block content — the gap is always emitted
+            // fresh by draw_frame, never baked into anchor_row.
             let prompt_section_rows = active_rows + gap + new_rows;
             if scrolled {
                 let height = terminal::size().map(|(_, h)| h).unwrap_or(24);
                 self.prompt.anchor_row = Some(height.saturating_sub(prompt_section_rows));
             } else {
-                self.prompt.anchor_row = Some(top_row + block_rows + gap);
+                self.prompt.anchor_row = Some(top_row + block_rows);
             }
             // prev_dialog_row: where the prompt bar actually starts (after active
             // tool + gap).  Dialogs render here to line up with the prompt.

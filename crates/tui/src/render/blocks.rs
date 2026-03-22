@@ -23,7 +23,6 @@ pub(super) enum Element<'a> {
     Block(&'a Block),
     ActiveTool,
     ActiveExec,
-    Prompt,
 }
 
 /// Number of blank lines to insert between two adjacent elements.
@@ -60,8 +59,6 @@ pub(super) fn gap_between(above: &Element, below: &Element) -> u16 {
         (Element::Block(Block::Compacted { .. }), _) => 1,
         (_, Element::ActiveExec) => 1,
         (Element::ActiveExec, _) => 1,
-        (Element::Block(_), Element::Prompt) => 1,
-        (Element::ActiveTool, Element::Prompt) => 1,
         _ => 0,
     }
 }
