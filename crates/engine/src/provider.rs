@@ -1055,8 +1055,26 @@ fn extract_tool_calls_from_text(text: Option<&str>) -> (Vec<ToolCall>, Option<St
     (calls, cleaned)
 }
 
-/// Parse a JSON tool call body: `{"name": "...", "arguments": {...}}`
+/// Parse a tool call body in either JSON or XML-attribute format.
+///
+/// JSON format: `{"name": "...", "arguments": {...}}`
+/// XML format:
+/// ```text
+/// <function=tool_name>
+/// <parameter=key>value</parameter>
+/// ...
+/// </function>
+/// ```
 fn parse_tool_call_json(raw: &str, idx: &mut usize) -> Option<ToolCall> {
+    // Try JSON first
+    if let Some(tc) = parse_tool_call_json_inner(raw, idx) {
+        return Some(tc);
+    }
+    // Fall back to XML-attribute format
+    parse_tool_call_xml(raw, idx)
+}
+
+fn parse_tool_call_json_inner(raw: &str, idx: &mut usize) -> Option<ToolCall> {
     let v: serde_json::Value = serde_json::from_str(raw).ok()?;
     let name = v["name"].as_str()?;
     let arguments = match &v["arguments"] {
@@ -1073,6 +1091,44 @@ fn parse_tool_call_json(raw: &str, idx: &mut usize) -> Option<ToolCall> {
             arguments,
         },
     ))
+}
+
+/// Parse `<function=name><parameter=k>v</parameter>...</function>` format.
+fn parse_tool_call_xml(raw: &str, idx: &mut usize) -> Option<ToolCall> {
+    // Extract function name: <function=tool_name>
+    let func_start = raw.find("<function=")?;
+    let after_eq = &raw[func_start + "<function=".len()..];
+    let name_end = after_eq.find('>')?;
+    let name = after_eq[..name_end].trim().to_string();
+    if name.is_empty() {
+        return None;
+    }
+
+    // Extract parameters: <parameter=key>value</parameter>
+    let mut params = serde_json::Map::new();
+    let mut rest = &after_eq[name_end + 1..];
+    while let Some(param_start) = rest.find("<parameter=") {
+        let after_param_eq = &rest[param_start + "<parameter=".len()..];
+        let key_end = after_param_eq.find('>')?;
+        let key = after_param_eq[..key_end].trim();
+        let value_start = &after_param_eq[key_end + 1..];
+        let value_end = value_start.find("</parameter>")?;
+        let value = value_start[..value_end].to_string();
+        // Trim a single leading newline — the XML format often has one after `>`
+        let value = value.strip_prefix('\n').unwrap_or(&value).to_string();
+        let value = value.strip_suffix('\n').unwrap_or(&value).to_string();
+        params.insert(key.to_string(), serde_json::Value::String(value));
+        rest = &value_start[value_end + "</parameter>".len()..];
+    }
+
+    if params.is_empty() {
+        return None;
+    }
+
+    let arguments = serde_json::Value::Object(params).to_string();
+    let id = format!("fallback-{idx}");
+    *idx += 1;
+    Some(ToolCall::new(id, FunctionCall { name, arguments }))
 }
 
 #[cfg(test)]
@@ -1140,5 +1196,56 @@ mod tests {
         let (calls, cleaned) = extract_tool_calls_from_text(None);
         assert!(calls.is_empty());
         assert!(cleaned.is_none());
+    }
+
+    #[test]
+    fn extract_xml_format_tool_call() {
+        let text = r#"
+<tool_call>
+<function=write_file>
+<parameter=file_path>/testbed/test.py</parameter>
+<parameter=content>
+print("hello")
+</parameter>
+</function>
+</tool_call>"#;
+
+        let (calls, cleaned) = extract_tool_calls_from_text(Some(text));
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "write_file");
+        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args["file_path"], "/testbed/test.py");
+        assert_eq!(args["content"], "print(\"hello\")");
+        assert!(cleaned.is_none() || cleaned.as_deref().unwrap().trim().is_empty());
+    }
+
+    #[test]
+    fn extract_xml_format_with_multiline_content() {
+        let text = r#"Let me try this:
+
+<tool_call>
+<function=write_file>
+<parameter=content>
+import sys
+
+class Base:
+    pass
+</parameter>
+<parameter=file_path>
+/testbed/test_clear.py
+</parameter>
+</function>
+</tool_call>"#;
+
+        let (calls, cleaned) = extract_tool_calls_from_text(Some(text));
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "write_file");
+        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert!(args["content"].as_str().unwrap().contains("class Base:"));
+        assert!(args["file_path"]
+            .as_str()
+            .unwrap()
+            .contains("test_clear.py"));
+        assert_eq!(cleaned.unwrap(), "Let me try this:");
     }
 }
