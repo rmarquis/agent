@@ -867,6 +867,9 @@ impl App {
             SessionControl::Done => LoopAction::Done,
             SessionControl::NeedsConfirm(mut req) => {
                 if req.tool_name.is_empty() {
+                    // Invariant: permission checks run sequentially in the
+                    // engine's Phase 1, so the most recently pushed pending
+                    // tool is always the one awaiting permission.
                     req.tool_name = pending.last().map(|p| p.name.clone()).unwrap_or_default();
                 }
 

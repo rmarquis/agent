@@ -58,6 +58,7 @@ pub struct ToolContext<'a> {
     pub model: &'a str,
     pub session_id: &'a str,
     pub session_dir: &'a std::path::Path,
+    pub file_locks: &'a FileLocks,
 }
 
 pub type ToolFuture<'a> = Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>>;
@@ -291,6 +292,29 @@ pub type FileHashes = Arc<Mutex<HashMap<String, u64>>>;
 
 pub fn new_file_hashes() -> FileHashes {
     Arc::new(Mutex::new(HashMap::new()))
+}
+
+/// Per-path locks that serialize concurrent file-mutating operations.
+/// Concurrent tool calls (edit_file, write_file, notebook_edit) targeting
+/// the same file will execute sequentially, while different files remain
+/// parallel. Entries are pruned when no one else holds a reference.
+#[derive(Clone, Default)]
+pub struct FileLocks(Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>);
+
+impl FileLocks {
+    pub async fn lock(&self, path: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let mutex = {
+            let mut map = self.0.lock().unwrap();
+            // Prune idle entries (strong_count == 1 means only the map holds it).
+            if map.len() > 32 {
+                map.retain(|_, v| Arc::strong_count(v) > 1);
+            }
+            map.entry(path.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        mutex.lock_owned().await
+    }
 }
 
 pub fn build_tools(processes: ProcessRegistry) -> ToolRegistry {

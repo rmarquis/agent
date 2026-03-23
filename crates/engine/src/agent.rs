@@ -28,6 +28,7 @@ pub async fn engine_task(
     event_tx: mpsc::UnboundedSender<EngineEvent>,
 ) {
     let client = reqwest::Client::new();
+    let file_locks = tools::FileLocks::default();
 
     let _ = event_tx.send(EngineEvent::Ready);
 
@@ -83,6 +84,7 @@ pub async fn engine_task(
                             started_at: Instant::now(),
                             tps_samples: Vec::new(),
                             tool_elapsed: HashMap::new(),
+                            file_locks: &file_locks,
                         };
                         turn.run(input_content, history).await;
                     }
@@ -327,6 +329,7 @@ struct Turn<'a> {
     config: &'a EngineConfig,
     http_client: &'a reqwest::Client,
     cancel: crate::cancel::CancellationToken,
+    file_locks: &'a tools::FileLocks,
     messages: Vec<Message>,
     mode: Mode,
     reasoning_effort: ReasoningEffort,
@@ -637,6 +640,7 @@ impl<'a> Turn<'a> {
                     model: &self.model,
                     session_id: &self.session_id,
                     session_dir: &self.session_dir,
+                    file_locks: self.file_locks,
                 })
                 .collect();
 
@@ -646,7 +650,22 @@ impl<'a> Turn<'a> {
                 .map(|(a, ctx)| a.tool.execute(a.args.clone(), ctx))
                 .collect();
 
-            let results = futures_util::future::join_all(futures).await;
+            let results = tokio::select! {
+                results = futures_util::future::join_all(futures) => results,
+                _ = self.cancel.cancelled() => {
+                    // Cancellation requested — emit ToolFinished for any
+                    // in-flight tools so the TUI can clean up.
+                    for a in &approved {
+                        self.push_tool_result(
+                            &a.tc.id,
+                            "cancelled",
+                            true,
+                            Some(a.start),
+                        );
+                    }
+                    continue;
+                }
+            };
 
             // Phase 2b: Execute sequential tools (ask_user_question).
             let mut seq_results: Vec<ToolResult> = Vec::new();

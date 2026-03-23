@@ -42,9 +42,13 @@ impl Tool for WriteFileTool {
     fn execute<'a>(
         &'a self,
         args: HashMap<String, Value>,
-        _ctx: &'a ToolContext<'a>,
+        ctx: &'a ToolContext<'a>,
     ) -> ToolFuture<'a> {
-        Box::pin(async move { tokio::task::block_in_place(|| self.run(&args)) })
+        Box::pin(async move {
+            let path = str_arg(&args, "file_path");
+            let _guard = ctx.file_locks.lock(&path).await;
+            tokio::task::block_in_place(|| self.run(&args))
+        })
     }
 }
 

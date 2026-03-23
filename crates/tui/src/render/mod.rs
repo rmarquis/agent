@@ -747,8 +747,19 @@ impl Screen {
         self.active_exec.is_some()
     }
 
+    /// Index of an active tool by call_id. Empty call_id (e.g.
+    /// ask_user_question) falls back to the last active tool.
+    fn active_tool_index(&self, call_id: &str) -> Option<usize> {
+        if call_id.is_empty() {
+            self.active_tools.len().checked_sub(1)
+        } else {
+            self.active_tools.iter().position(|t| t.call_id == call_id)
+        }
+    }
+
     fn active_tool_mut(&mut self, call_id: &str) -> Option<&mut ActiveTool> {
-        self.active_tools.iter_mut().find(|t| t.call_id == call_id)
+        let idx = self.active_tool_index(call_id)?;
+        Some(&mut self.active_tools[idx])
     }
 
     pub fn append_active_output(&mut self, call_id: &str, chunk: &str) {
@@ -822,7 +833,7 @@ impl Screen {
         output: Option<ToolOutput>,
         engine_elapsed: Option<Duration>,
     ) {
-        if let Some(idx) = self.active_tools.iter().position(|t| t.call_id == call_id) {
+        if let Some(idx) = self.active_tool_index(call_id) {
             let tool = self.active_tools.remove(idx);
             let elapsed = if status == ToolStatus::Denied {
                 None
@@ -868,8 +879,13 @@ impl Screen {
         let w = crossterm::terminal::size()
             .map(|(w, _)| w as usize)
             .unwrap_or(80);
+        let inter_tool_gap =
+            blocks::gap_between(&blocks::Element::ActiveTool, &blocks::Element::ActiveTool);
         let mut total = gap;
-        for tool in &self.active_tools {
+        for (i, tool) in self.active_tools.iter().enumerate() {
+            if i > 0 {
+                total += inter_tool_gap;
+            }
             // At confirm time there's no output yet, so tool rows = 1 + optional web_fetch prompt
             let mut rows = 1u16;
             if tool.name == "web_fetch" {
@@ -1266,7 +1282,7 @@ impl Screen {
                         0
                     }
                 } else {
-                    0
+                    gap_between(&Element::ActiveTool, &Element::ActiveTool)
                 };
                 for _ in 0..tool_gap {
                     crlf(&mut out);

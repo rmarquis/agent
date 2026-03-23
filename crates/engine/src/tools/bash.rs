@@ -163,6 +163,13 @@ async fn execute_streaming(
                     is_error: true,
                 };
             }
+            _ = ctx.cancel.cancelled() => {
+                let _ = child.kill().await;
+                return ToolResult {
+                    content: "cancelled".into(),
+                    is_error: true,
+                };
+            }
         }
     }
 
