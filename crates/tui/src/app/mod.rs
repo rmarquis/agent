@@ -344,6 +344,7 @@ impl App {
         screen.set_model_label(model.clone());
         screen.set_reasoning_effort(reasoning_effort);
         screen.set_show_speed(show_speed);
+        screen.set_show_slug(task_slug);
 
         let cwd = std::env::current_dir()
             .ok()
