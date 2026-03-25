@@ -1,5 +1,6 @@
 mod agent;
 mod commands;
+pub(crate) use commands::copy_to_clipboard;
 mod events;
 mod history;
 

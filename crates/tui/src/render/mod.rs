@@ -1450,12 +1450,7 @@ impl Screen {
         } else {
             0
         };
-        let vi_normal = state.vim_mode() == Some(crate::vim::ViMode::Normal);
-        let bar_color = if vi_normal {
-            theme::accent()
-        } else {
-            theme::BAR
-        };
+        let bar_color = theme::BAR;
 
         // Build all bar spans with priorities. draw_bar drops highest
         // priority first until everything fits.
@@ -1597,6 +1592,14 @@ impl Screen {
         let display_buf = spans_to_string(&spans);
         let char_kinds = build_char_kinds(&spans);
         let display_cursor = map_cursor(state.cursor_char(), &state.buf, &spans);
+        // Map selection range from raw byte offsets to display character offsets.
+        let display_selection = state.selection_range().map(|(start, end)| {
+            let raw_start_char = crate::input::char_pos(&state.buf, start);
+            let raw_end_char = crate::input::char_pos(&state.buf, end);
+            let ds = map_cursor(raw_start_char, &state.buf, &spans);
+            let de = map_cursor(raw_end_char, &state.buf, &spans);
+            (ds, de)
+        });
         let (visual_lines, cursor_line, cursor_col) =
             wrap_and_locate_cursor(&display_buf, &char_kinds, display_cursor, usable);
         let cmd_hint =
@@ -1688,6 +1691,12 @@ impl Screen {
             let _ = out.queue(Print("\r\n"));
         }
 
+        // Compute cumulative display-char offset for each visual line.
+        // Must match the counting logic in wrap_and_locate_cursor: each
+        // visual line contributes its char count, and each '\n' in the
+        // display buffer contributes 1 additional char between logical lines.
+        let line_char_offsets = compute_visual_line_offsets(&display_buf, &visual_lines);
+
         for (li, (line, kinds)) in visual_lines
             .iter()
             .skip(scroll_offset)
@@ -1699,6 +1708,19 @@ impl Screen {
             .enumerate()
         {
             let abs_idx = scroll_offset + li;
+            // Compute per-line selection range (in char offsets within this line).
+            let line_sel = display_selection.and_then(|(sel_start, sel_end)| {
+                let line_start = line_char_offsets[abs_idx];
+                let line_len = line.chars().count();
+                let line_end = line_start + line_len;
+                if sel_end <= line_start || sel_start >= line_end {
+                    None
+                } else {
+                    let s = sel_start.saturating_sub(line_start);
+                    let e = sel_end.min(line_end) - line_start;
+                    Some((s, e))
+                }
+            });
             let _ = out.queue(Print(" "));
             if has_arg_space && abs_idx == 0 {
                 // Command prefix in accent, argument text in normal style.
@@ -1732,21 +1754,35 @@ impl Screen {
                     let _ = out.queue(ResetColor);
                 }
             } else if has_arg_space {
-                // Wrapped continuation lines of an arg command — normal style.
-                let _ = out.queue(Print(line));
+                render_styled_chars(out, line, kinds, line_sel);
             } else if is_command {
-                let _ = out.queue(SetForegroundColor(theme::accent()));
-                let _ = out.queue(Print(line));
-                let _ = out.queue(ResetColor);
+                // All chars are accent-colored; reuse AtRef kind for accent rendering.
+                let accent_kinds = vec![SpanKind::AtRef; line.chars().count()];
+                render_styled_chars(out, line, &accent_kinds, line_sel);
             } else if (is_exec || is_exec_invalid) && abs_idx == 0 && line.starts_with('!') {
+                // Render the `!` prefix with its own style (possibly selected).
+                let bang_selected = line_sel.is_some_and(|(s, _)| s == 0);
+                if bang_selected {
+                    let _ = out.queue(SetBackgroundColor(theme::SELECTION_BG));
+                }
                 let _ = out.queue(SetForegroundColor(Color::Red));
                 let _ = out.queue(SetAttribute(Attribute::Bold));
                 let _ = out.queue(Print("!"));
                 let _ = out.queue(SetAttribute(Attribute::Reset));
                 let _ = out.queue(ResetColor);
-                render_styled_chars(out, &line[1..], &kinds[1..]);
+                // Shift selection range by 1 for the remaining text.
+                let rest_sel = line_sel.and_then(|(s, e)| {
+                    let s2 = if s == 0 { 0 } else { s - 1 };
+                    let e2 = e.saturating_sub(1);
+                    if s2 < e2 {
+                        Some((s2, e2))
+                    } else {
+                        None
+                    }
+                });
+                render_styled_chars(out, &line[1..], &kinds[1..], rest_sel);
             } else {
-                render_styled_chars(out, line, kinds);
+                render_styled_chars(out, line, kinds, line_sel);
             }
             let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
             let _ = out.queue(Print("\r\n"));
@@ -1788,6 +1824,24 @@ impl Screen {
             bar_color,
         );
 
+        // Vim mode indicator line: show "-- NORMAL --" etc. when in
+        // normal/visual mode. Hidden when completions or menus are visible.
+        let vim_indicator_rows = if comp_rows == 0 {
+            if let Some(label) = vim_mode_label(state.vim_mode()) {
+                let _ = out.queue(Print("\r\n"));
+                let _ = out.queue(Print("  "));
+                let _ = out.queue(SetAttribute(Attribute::Bold));
+                let _ = out.queue(Print(label));
+                let _ = out.queue(SetAttribute(Attribute::Reset));
+                let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
+                1
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
         if comp_rows > 0 {
             let _ = out.queue(Print("\r\n"));
         }
@@ -1797,7 +1851,14 @@ impl Screen {
             draw_completions(out, state.completer.as_ref(), comp_rows)
         };
 
-        let total_rows = stash_rows + queued_rows + btw_visual + 1 + content_rows + 1 + comp_rows;
+        let total_rows = stash_rows
+            + queued_rows
+            + btw_visual
+            + 1
+            + content_rows
+            + 1
+            + vim_indicator_rows
+            + comp_rows;
         let new_rows = total_rows as u16;
 
         if prev_rows > new_rows {
@@ -1859,6 +1920,15 @@ impl Screen {
         }
 
         (top_row, total_rows as u16, scrolled)
+    }
+}
+
+fn vim_mode_label(mode: Option<crate::vim::ViMode>) -> Option<&'static str> {
+    match mode {
+        Some(crate::vim::ViMode::Insert) => Some("-- INSERT --"),
+        Some(crate::vim::ViMode::Visual) => Some("-- VISUAL --"),
+        Some(crate::vim::ViMode::VisualLine) => Some("-- VISUAL LINE --"),
+        _ => None,
     }
 }
 
@@ -2243,6 +2313,49 @@ fn wrap_and_locate_cursor(
     (visual_lines, cursor_line, cursor_col)
 }
 
+/// Compute the display-char offset of each visual line.
+///
+/// The display buffer is the concatenation of spans (with attachments
+/// expanded to their labels).  `wrap_and_locate_cursor` splits on `\n`
+/// and then further wraps each logical line into visual lines.  The
+/// char offsets it uses include +1 for every `\n` consumed by `split`.
+/// We replicate that counting here by re-splitting the display buffer
+/// and mapping each logical line's visual chunks to offsets.
+fn compute_visual_line_offsets(
+    display_buf: &str,
+    visual_lines: &[(String, Vec<SpanKind>)],
+) -> Vec<usize> {
+    let mut offsets = Vec::with_capacity(visual_lines.len());
+    let mut chars_seen: usize = 0;
+    let mut vl_idx = 0;
+    let newline_count = display_buf.chars().filter(|&c| c == '\n').count();
+
+    for (li, text_line) in display_buf.split('\n').enumerate() {
+        let line_chars = text_line.chars().count();
+        if line_chars == 0 {
+            if vl_idx < visual_lines.len() {
+                offsets.push(chars_seen);
+                vl_idx += 1;
+            }
+        } else {
+            let mut consumed = 0;
+            while vl_idx < visual_lines.len() && consumed < line_chars {
+                offsets.push(chars_seen + consumed);
+                consumed += visual_lines[vl_idx].0.chars().count();
+                vl_idx += 1;
+            }
+        }
+        chars_seen += line_chars;
+        if li < newline_count {
+            chars_seen += 1;
+        }
+    }
+    while offsets.len() < visual_lines.len() {
+        offsets.push(chars_seen);
+    }
+    offsets
+}
+
 pub(super) struct BarSpan {
     text: String,
     color: Color,
@@ -2548,22 +2661,36 @@ fn map_cursor(raw_cursor: usize, raw_buf: &str, spans: &[Span]) -> usize {
 }
 
 /// Render a line using pre-computed per-character span kinds.
-fn render_styled_chars(out: &mut RenderOut, line: &str, kinds: &[SpanKind]) {
+/// `selection` is an optional (start_char, end_char) range within this line.
+fn render_styled_chars(
+    out: &mut RenderOut,
+    line: &str,
+    kinds: &[SpanKind],
+    selection: Option<(usize, usize)>,
+) {
     let mut current = SpanKind::Plain;
+    let mut in_sel = false;
     for (i, ch) in line.chars().enumerate() {
         let kind = kinds.get(i).copied().unwrap_or(SpanKind::Plain);
-        if kind != current {
-            if current != SpanKind::Plain {
+        let want_sel = selection.is_some_and(|(s, e)| i >= s && i < e);
+
+        if kind != current || want_sel != in_sel {
+            // Reset previous styling before applying new.
+            if in_sel || current != SpanKind::Plain {
                 let _ = out.queue(ResetColor);
+            }
+            if want_sel {
+                let _ = out.queue(SetBackgroundColor(theme::SELECTION_BG));
             }
             if kind == SpanKind::AtRef || kind == SpanKind::Attachment {
                 let _ = out.queue(SetForegroundColor(theme::accent()));
             }
             current = kind;
+            in_sel = want_sel;
         }
         let _ = out.queue(Print(ch));
     }
-    if current != SpanKind::Plain {
+    if in_sel || current != SpanKind::Plain {
         let _ = out.queue(ResetColor);
     }
 }
@@ -2924,4 +3051,77 @@ fn draw_stats(
         drawn += 1;
     }
     drawn
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+
+    fn vlines(strs: &[&str]) -> Vec<(String, Vec<SpanKind>)> {
+        strs.iter()
+            .map(|s| (s.to_string(), vec![SpanKind::Plain; s.chars().count()]))
+            .collect()
+    }
+
+    #[test]
+    fn offsets_single_line() {
+        let offsets = compute_visual_line_offsets("hello", &vlines(&["hello"]));
+        assert_eq!(offsets, vec![0]);
+    }
+
+    #[test]
+    fn offsets_two_logical_lines() {
+        let offsets = compute_visual_line_offsets("aaa\nbbb", &vlines(&["aaa", "bbb"]));
+        assert_eq!(offsets, vec![0, 4]);
+    }
+
+    #[test]
+    fn offsets_three_logical_lines() {
+        let offsets = compute_visual_line_offsets("aaa\nbbb\nccc", &vlines(&["aaa", "bbb", "ccc"]));
+        assert_eq!(offsets, vec![0, 4, 8]);
+    }
+
+    #[test]
+    fn offsets_empty_line() {
+        let offsets = compute_visual_line_offsets("aaa\n\nccc", &vlines(&["aaa", "", "ccc"]));
+        assert_eq!(offsets, vec![0, 4, 5]);
+    }
+
+    #[test]
+    fn offsets_wrapped_line() {
+        let offsets = compute_visual_line_offsets("abcdef", &vlines(&["abc", "def"]));
+        assert_eq!(offsets, vec![0, 3]);
+    }
+
+    #[test]
+    fn offsets_wrapped_multiline() {
+        let offsets = compute_visual_line_offsets("abcdef\nxy", &vlines(&["abc", "def", "xy"]));
+        assert_eq!(offsets, vec![0, 3, 7]);
+    }
+
+    #[test]
+    fn offsets_selection_across_wrapped() {
+        let offsets = compute_visual_line_offsets("abcdef", &vlines(&["abc", "def"]));
+        // Selection chars 1..5 should map to line0:(1,3), line1:(0,2).
+        let sel = (1usize, 5usize);
+        let l0_s = sel.0.saturating_sub(offsets[0]);
+        let l0_e = sel.1.min(offsets[0] + 3) - offsets[0];
+        assert_eq!((l0_s, l0_e), (1, 3));
+        let l1_s = sel.0.saturating_sub(offsets[1]);
+        let l1_e = sel.1.min(offsets[1] + 3) - offsets[1];
+        assert_eq!((l1_s, l1_e), (0, 2));
+    }
+
+    #[test]
+    fn offsets_selection_across_logical() {
+        let offsets = compute_visual_line_offsets("aaa\nbbb", &vlines(&["aaa", "bbb"]));
+        // Select display chars 1..6 = "aa\nbb".
+        let sel = (1usize, 6usize);
+        let l0_s = sel.0.saturating_sub(offsets[0]);
+        let l0_e = sel.1.min(offsets[0] + 3) - offsets[0];
+        assert_eq!((l0_s, l0_e), (1, 3));
+        let l1_s = sel.0.saturating_sub(offsets[1]);
+        let l1_e = sel.1.min(offsets[1] + 3) - offsets[1];
+        assert_eq!((l1_s, l1_e), (0, 2));
+    }
 }

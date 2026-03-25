@@ -7,6 +7,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 pub enum ViMode {
     Insert,
     Normal,
+    Visual,
+    VisualLine,
 }
 
 /// What the caller should do after a key is processed.
@@ -77,6 +79,8 @@ enum SubState {
     WaitingOpFind(Op, FindKind),
     /// Operator + `i`/`a` pressed, waiting for object type char.
     WaitingTextObj(Op, bool),
+    /// Visual mode `i`/`a` pressed, waiting for object type char.
+    WaitingVisualTextObj(bool),
 }
 
 struct UndoEntry {
@@ -101,6 +105,8 @@ pub struct Vim {
     redo_stack: Vec<UndoEntry>,
     /// Snapshot saved when entering insert mode — committed to undo_stack on exit.
     insert_snapshot: Option<UndoEntry>,
+    /// Byte position of the visual mode anchor (where 'v'/'V' was pressed).
+    visual_anchor: usize,
 }
 
 impl Default for Vim {
@@ -122,11 +128,37 @@ impl Vim {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             insert_snapshot: None,
+            visual_anchor: 0,
         }
     }
 
     pub fn mode(&self) -> ViMode {
         self.mode
+    }
+
+    /// Returns the visual selection range (start, end) as byte offsets when
+    /// in visual or visual-line mode. The range is always ordered (start <= end).
+    pub fn visual_range(&self, buf: &str, cpos: usize) -> Option<(usize, usize)> {
+        match self.mode {
+            ViMode::Visual => {
+                let anchor = self.visual_anchor.min(buf.len());
+                let cursor = cpos.min(buf.len());
+                let (a, b) = if anchor <= cursor {
+                    (anchor, next_char_boundary(buf, cursor).min(buf.len()))
+                } else {
+                    (cursor, next_char_boundary(buf, anchor).min(buf.len()))
+                };
+                Some((a, b))
+            }
+            ViMode::VisualLine => {
+                let anchor = self.visual_anchor.min(buf.len());
+                let cursor = cpos.min(buf.len());
+                let start = line_start(buf, anchor).min(line_start(buf, cursor));
+                let end = line_end(buf, anchor).max(line_end(buf, cursor));
+                Some((start, end))
+            }
+            _ => None,
+        }
     }
 
     pub fn set_mode(&mut self, mode: ViMode) {
@@ -157,6 +189,7 @@ impl Vim {
         match self.mode {
             ViMode::Insert => self.handle_insert(key, buf, cpos, attachments),
             ViMode::Normal => self.handle_normal(key, buf, cpos, attachments),
+            ViMode::Visual | ViMode::VisualLine => self.handle_visual(key, buf, cpos, attachments),
         }
     }
 
@@ -270,7 +303,7 @@ impl Vim {
                 }
                 return result;
             }
-            SubState::Ready => {}
+            SubState::WaitingVisualTextObj(_) | SubState::Ready => {}
         }
 
         // Ready state — handle count digits, commands, motions.
@@ -472,7 +505,8 @@ impl Vim {
                     } else {
                         let after = advance_chars(buf, *cpos, 1).min(buf.len());
                         buf.insert_str(after, &self.register);
-                        *cpos = after;
+                        // Cursor on last char of pasted text.
+                        *cpos = after + self.register.len();
                         clamp_normal(buf, cpos);
                     }
                 }
@@ -492,9 +526,9 @@ impl Vim {
                             .count();
                     } else {
                         buf.insert_str(*cpos, &self.register);
-                        // Cursor on last char of pasted text.
                         let plen = self.register.len();
                         if plen > 0 {
+                            // Cursor on last char of pasted text.
                             *cpos += plen;
                             clamp_normal(buf, cpos);
                         }
@@ -509,10 +543,18 @@ impl Vim {
                 Action::Consumed
             }
 
-            // ── Edit in $EDITOR ─────────────────────────────────────────
+            // ── Visual mode ─────────────────────────────────────────────
             'v' => {
+                self.visual_anchor = *cpos;
+                self.mode = ViMode::Visual;
                 self.reset_pending();
-                Action::EditInEditor
+                Action::Consumed
+            }
+            'V' => {
+                self.visual_anchor = *cpos;
+                self.mode = ViMode::VisualLine;
+                self.reset_pending();
+                Action::Consumed
             }
 
             // ── Enter insert mode ───────────────────────────────────────
@@ -580,7 +622,14 @@ impl Vim {
                     let n = self.take_count();
                     let mut pos = *cpos;
                     for _ in 0..n {
-                        if let Some(p) = find_char(buf, pos, kind, ch) {
+                        // For t/T repeats, temporarily advance past current
+                        // position so we don't re-find the same character.
+                        let search_pos = match kind {
+                            FindKind::ForwardTill => next_char_boundary(buf, pos),
+                            FindKind::BackwardTill => prev_char_boundary(buf, pos),
+                            _ => pos,
+                        };
+                        if let Some(p) = find_char(buf, search_pos, kind, ch) {
                             pos = p;
                         }
                     }
@@ -595,7 +644,12 @@ impl Vim {
                     let rev = kind.reversed();
                     let mut pos = *cpos;
                     for _ in 0..n {
-                        if let Some(p) = find_char(buf, pos, rev, ch) {
+                        let search_pos = match rev {
+                            FindKind::ForwardTill => next_char_boundary(buf, pos),
+                            FindKind::BackwardTill => prev_char_boundary(buf, pos),
+                            _ => pos,
+                        };
+                        if let Some(p) = find_char(buf, search_pos, rev, ch) {
                             pos = p;
                         }
                     }
@@ -749,6 +803,444 @@ impl Vim {
                 self.reset_pending();
                 Action::Consumed
             }
+        }
+    }
+
+    // ── Visual mode ──────────────────────────────────────────────────────
+
+    fn handle_visual(
+        &mut self,
+        key: KeyEvent,
+        buf: &mut String,
+        cpos: &mut usize,
+        attachments: &mut [AttachmentId],
+    ) -> Action {
+        // Ctrl+key handling in visual mode — pass through the same keys
+        // as normal mode so the keymap can handle them (scroll, history, etc.).
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            if let KeyCode::Char(
+                'c' | 'd' | 'u' | 't' | 'k' | 'l' | 'f' | 'b' | 'j' | 'n' | 'p' | 's',
+            ) = key.code
+            {
+                return Action::Passthrough;
+            }
+        }
+        // Cmd+key (SUPER) passes through for clipboard operations.
+        if key.modifiers.contains(KeyModifiers::SUPER) {
+            return Action::Passthrough;
+        }
+
+        // BackTab passes through for mode toggle.
+        if key.code == KeyCode::BackTab {
+            return Action::Passthrough;
+        }
+
+        // Handle sub-states (WaitingG for gg, WaitingFind for f/t, text objects).
+        match self.sub {
+            SubState::WaitingG => return self.handle_waiting_g(key, buf, cpos),
+            SubState::WaitingFind(kind) => return self.handle_waiting_find(key, kind, buf, cpos),
+            SubState::WaitingVisualTextObj(inner) => {
+                self.sub = SubState::Ready;
+                if let KeyCode::Char(c) = key.code {
+                    if let Some((start, end)) = text_object(buf, *cpos, inner, c) {
+                        self.visual_anchor = start;
+                        // Cursor on the last char of the object (inclusive).
+                        *cpos = if end > start {
+                            prev_char_boundary(buf, end)
+                        } else {
+                            start
+                        };
+                    }
+                }
+                return Action::Consumed;
+            }
+            _ => {}
+        }
+
+        if let KeyCode::Char(c) = key.code {
+            if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
+                return self.handle_visual_char(c, buf, cpos, attachments);
+            }
+        }
+
+        match key.code {
+            KeyCode::Esc => {
+                self.exit_visual();
+                Action::Consumed
+            }
+            KeyCode::Left => {
+                *cpos = move_left(buf, *cpos);
+                Action::Consumed
+            }
+            KeyCode::Right => {
+                *cpos = move_right_normal(buf, *cpos);
+                Action::Consumed
+            }
+            KeyCode::Up => {
+                *cpos = move_up(buf, *cpos);
+                Action::Consumed
+            }
+            KeyCode::Down => {
+                *cpos = move_down(buf, *cpos);
+                Action::Consumed
+            }
+            KeyCode::Home => {
+                *cpos = line_start(buf, *cpos);
+                Action::Consumed
+            }
+            KeyCode::End => {
+                *cpos = line_end_normal(buf, *cpos);
+                Action::Consumed
+            }
+            _ => Action::Consumed,
+        }
+    }
+
+    fn handle_visual_char(
+        &mut self,
+        c: char,
+        buf: &mut String,
+        cpos: &mut usize,
+        attachments: &mut [AttachmentId],
+    ) -> Action {
+        match c {
+            // ── Escape visual mode ─────────────────────────────────────
+            'v' if self.mode == ViMode::Visual => {
+                self.exit_visual();
+                Action::Consumed
+            }
+            'V' if self.mode == ViMode::VisualLine => {
+                self.exit_visual();
+                Action::Consumed
+            }
+            // Switch between visual modes
+            'v' if self.mode == ViMode::VisualLine => {
+                self.mode = ViMode::Visual;
+                Action::Consumed
+            }
+            'V' if self.mode == ViMode::Visual => {
+                self.mode = ViMode::VisualLine;
+                Action::Consumed
+            }
+
+            // ── Operators on selection ──────────────────────────────────
+            'd' | 'x' => {
+                if let Some((start, end)) = self.visual_range(buf, *cpos) {
+                    let linewise = self.mode == ViMode::VisualLine;
+                    self.save_undo(buf, *cpos, attachments);
+                    self.yank(&buf[start..end], linewise);
+                    if linewise {
+                        // Include trailing newline if present.
+                        let drain_end = if end < buf.len() && buf.as_bytes()[end] == b'\n' {
+                            end + 1
+                        } else if start > 0 && buf.as_bytes()[start - 1] == b'\n' {
+                            // Last line(s) — remove preceding newline.
+                            let s = start - 1;
+                            buf.drain(s..end);
+                            *cpos = s.min(buf.len());
+                            clamp_normal(buf, cpos);
+                            if !buf.is_empty() && *cpos < buf.len() {
+                                *cpos = first_non_blank_at(buf, line_start(buf, *cpos));
+                            }
+                            self.exit_visual();
+                            return Action::Consumed;
+                        } else {
+                            end
+                        };
+                        buf.drain(start..drain_end);
+                    } else {
+                        buf.drain(start..end);
+                    }
+                    *cpos = start.min(buf.len());
+                    clamp_normal(buf, cpos);
+                }
+                self.exit_visual();
+                Action::Consumed
+            }
+            'c' => {
+                if let Some((start, end)) = self.visual_range(buf, *cpos) {
+                    let linewise = self.mode == ViMode::VisualLine;
+                    self.save_undo(buf, *cpos, attachments);
+                    self.yank(&buf[start..end], linewise);
+                    if linewise {
+                        // Like cc: clear line content but keep the line structure.
+                        // Find the content range (excluding leading/trailing newlines).
+                        let content_start = first_non_blank_at(buf, start);
+                        buf.drain(content_start..end);
+                        *cpos = content_start;
+                    } else {
+                        buf.drain(start..end);
+                        *cpos = start;
+                    }
+                    self.mode = ViMode::Insert;
+                    self.sub = SubState::Ready;
+                    self.reset_counts();
+                    return Action::Consumed;
+                }
+                self.exit_visual();
+                Action::Consumed
+            }
+            'y' => {
+                if let Some((start, end)) = self.visual_range(buf, *cpos) {
+                    let linewise = self.mode == ViMode::VisualLine;
+                    self.yank(&buf[start..end], linewise);
+                    *cpos = start;
+                }
+                self.exit_visual();
+                Action::Consumed
+            }
+
+            // ── Case toggling on selection ─────────────────────────────
+            '~' => {
+                if let Some((start, end)) = self.visual_range(buf, *cpos) {
+                    self.save_undo(buf, *cpos, attachments);
+                    let toggled: String = buf[start..end]
+                        .chars()
+                        .map(|ch| {
+                            if ch.is_uppercase() {
+                                ch.to_lowercase().next().unwrap_or(ch)
+                            } else {
+                                ch.to_uppercase().next().unwrap_or(ch)
+                            }
+                        })
+                        .collect();
+                    buf.replace_range(start..end, &toggled);
+                }
+                self.exit_visual();
+                Action::Consumed
+            }
+            'U' => {
+                if let Some((start, end)) = self.visual_range(buf, *cpos) {
+                    self.save_undo(buf, *cpos, attachments);
+                    let upper = buf[start..end].to_uppercase();
+                    buf.replace_range(start..end, &upper);
+                }
+                self.exit_visual();
+                Action::Consumed
+            }
+            'u' => {
+                if let Some((start, end)) = self.visual_range(buf, *cpos) {
+                    self.save_undo(buf, *cpos, attachments);
+                    let lower = buf[start..end].to_lowercase();
+                    buf.replace_range(start..end, &lower);
+                }
+                self.exit_visual();
+                Action::Consumed
+            }
+
+            // ── Join lines ─────────────────────────────────────────────
+            'J' => {
+                if let Some((start, end)) = self.visual_range(buf, *cpos) {
+                    self.save_undo(buf, *cpos, attachments);
+                    let mut pos = start;
+                    let mut remaining = end;
+                    while pos < remaining.min(buf.len()) {
+                        if let Some(nl) = buf[pos..remaining.min(buf.len())].find('\n') {
+                            let abs = pos + nl;
+                            let mut ws_end = abs + 1;
+                            while ws_end < buf.len() && buf.as_bytes()[ws_end] == b' ' {
+                                ws_end += 1;
+                            }
+                            let removed = ws_end - abs;
+                            buf.replace_range(abs..ws_end, " ");
+                            remaining -= removed - 1; // replaced N chars with 1
+                            pos = abs + 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    *cpos = start;
+                }
+                self.exit_visual();
+                Action::Consumed
+            }
+
+            // ── Paste over selection ───────────────────────────────────
+            'p' | 'P' => {
+                if !self.register.is_empty() {
+                    if let Some((start, end)) = self.visual_range(buf, *cpos) {
+                        self.save_undo(buf, *cpos, attachments);
+                        let old = buf[start..end].to_string();
+                        buf.replace_range(start..end, &self.register);
+                        *cpos = start;
+                        clamp_normal(buf, cpos);
+                        // The replaced text goes into register (like vim).
+                        self.register = old;
+                        self.register_linewise = false;
+                    }
+                }
+                self.exit_visual();
+                Action::Consumed
+            }
+
+            // ── Motions (move cursor, anchor stays) ────────────────────
+            'h' => {
+                let n = self.take_count();
+                for _ in 0..n {
+                    *cpos = move_left(buf, *cpos);
+                }
+                Action::Consumed
+            }
+            'l' => {
+                let n = self.take_count();
+                for _ in 0..n {
+                    *cpos = move_right_normal(buf, *cpos);
+                }
+                Action::Consumed
+            }
+            'j' => {
+                let n = self.take_count();
+                for _ in 0..n {
+                    *cpos = move_down(buf, *cpos);
+                }
+                clamp_normal(buf, cpos);
+                Action::Consumed
+            }
+            'k' => {
+                let n = self.take_count();
+                for _ in 0..n {
+                    *cpos = move_up(buf, *cpos);
+                }
+                clamp_normal(buf, cpos);
+                Action::Consumed
+            }
+            'w' => {
+                let n = self.take_count();
+                for _ in 0..n {
+                    *cpos = word_forward_pos(buf, *cpos, CharClass::Word);
+                }
+                clamp_normal(buf, cpos);
+                Action::Consumed
+            }
+            'W' => {
+                let n = self.take_count();
+                for _ in 0..n {
+                    *cpos = word_forward_pos(buf, *cpos, CharClass::WORD);
+                }
+                clamp_normal(buf, cpos);
+                Action::Consumed
+            }
+            'b' => {
+                let n = self.take_count();
+                for _ in 0..n {
+                    *cpos = word_backward_pos(buf, *cpos, CharClass::Word);
+                }
+                Action::Consumed
+            }
+            'B' => {
+                let n = self.take_count();
+                for _ in 0..n {
+                    *cpos = word_backward_pos(buf, *cpos, CharClass::WORD);
+                }
+                Action::Consumed
+            }
+            'e' => {
+                let n = self.take_count();
+                for _ in 0..n {
+                    *cpos = word_end_pos(buf, *cpos, CharClass::Word);
+                }
+                clamp_normal(buf, cpos);
+                Action::Consumed
+            }
+            'E' => {
+                let n = self.take_count();
+                for _ in 0..n {
+                    *cpos = word_end_pos(buf, *cpos, CharClass::WORD);
+                }
+                clamp_normal(buf, cpos);
+                Action::Consumed
+            }
+            '0' => {
+                *cpos = line_start(buf, *cpos);
+                Action::Consumed
+            }
+            '^' | '_' => {
+                *cpos = first_non_blank(buf, *cpos);
+                Action::Consumed
+            }
+            '$' => {
+                *cpos = line_end_normal(buf, *cpos);
+                Action::Consumed
+            }
+            'G' => {
+                self.take_count();
+                *cpos = buf.len();
+                clamp_normal(buf, cpos);
+                Action::Consumed
+            }
+            'g' => {
+                self.sub = SubState::WaitingG;
+                Action::Consumed
+            }
+            'f' => {
+                self.sub = SubState::WaitingFind(FindKind::Forward);
+                Action::Consumed
+            }
+            'F' => {
+                self.sub = SubState::WaitingFind(FindKind::Backward);
+                Action::Consumed
+            }
+            't' => {
+                self.sub = SubState::WaitingFind(FindKind::ForwardTill);
+                Action::Consumed
+            }
+            'T' => {
+                self.sub = SubState::WaitingFind(FindKind::BackwardTill);
+                Action::Consumed
+            }
+            ';' => {
+                if let Some((kind, ch)) = self.last_find {
+                    let n = self.take_count();
+                    let mut pos = *cpos;
+                    for _ in 0..n {
+                        if let Some(p) = find_char(buf, pos, kind, ch) {
+                            pos = p;
+                        }
+                    }
+                    *cpos = pos;
+                }
+                Action::Consumed
+            }
+            ',' => {
+                if let Some((kind, ch)) = self.last_find {
+                    let n = self.take_count();
+                    let rev = kind.reversed();
+                    let mut pos = *cpos;
+                    for _ in 0..n {
+                        if let Some(p) = find_char(buf, pos, rev, ch) {
+                            pos = p;
+                        }
+                    }
+                    *cpos = pos;
+                }
+                Action::Consumed
+            }
+
+            // ── Count digits ───────────────────────────────────────────
+            c if c.is_ascii_digit() && (c != '0' || self.count1.is_some()) => {
+                self.count1 =
+                    Some(self.count1.unwrap_or(0) * 10 + c.to_digit(10).unwrap() as usize);
+                Action::Consumed
+            }
+
+            // ── Swap anchor and cursor ─────────────────────────────────
+            'o' => {
+                std::mem::swap(&mut self.visual_anchor, cpos);
+                Action::Consumed
+            }
+
+            // ── Text objects (iw, aw, i", a( etc.) ────────────────────
+            'i' => {
+                self.sub = SubState::WaitingVisualTextObj(true);
+                Action::Consumed
+            }
+            'a' => {
+                self.sub = SubState::WaitingVisualTextObj(false);
+                Action::Consumed
+            }
+
+            // Unknown — swallow.
+            _ => Action::Consumed,
         }
     }
 
@@ -1016,15 +1508,32 @@ impl Vim {
             }
             KeyCode::Char('w') => {
                 let mut p = origin;
+                // vim special case: cw behaves like ce when cursor is on a word char.
+                let use_end = op == Op::Change
+                    && p < buf.len()
+                    && char_class(buf[p..].chars().next().unwrap(), CharClass::Word) != 0;
                 for _ in 0..n {
-                    p = word_forward_pos(buf, p, CharClass::Word);
+                    if use_end {
+                        p = word_end_pos(buf, p, CharClass::Word);
+                        p = advance_chars(buf, p, 1); // inclusive end
+                    } else {
+                        p = word_forward_pos(buf, p, CharClass::Word);
+                    }
                 }
                 Some(p)
             }
             KeyCode::Char('W') => {
                 let mut p = origin;
+                let use_end = op == Op::Change
+                    && p < buf.len()
+                    && char_class(buf[p..].chars().next().unwrap(), CharClass::WORD) != 0;
                 for _ in 0..n {
-                    p = word_forward_pos(buf, p, CharClass::WORD);
+                    if use_end {
+                        p = word_end_pos(buf, p, CharClass::WORD);
+                        p = advance_chars(buf, p, 1);
+                    } else {
+                        p = word_forward_pos(buf, p, CharClass::WORD);
+                    }
                 }
                 Some(p)
             }
@@ -1189,6 +1698,11 @@ impl Vim {
     fn enter_insert_mode(&mut self) {
         self.mode = ViMode::Insert;
         self.sub = SubState::Ready;
+    }
+
+    fn exit_visual(&mut self) {
+        self.mode = ViMode::Normal;
+        self.reset_pending();
     }
 
     fn enter_normal(&mut self, buf: &str, cpos: &mut usize) {
@@ -1425,11 +1939,11 @@ fn word_end_pos(buf: &str, cpos: usize, mode: CharClass) -> usize {
     next + chars[i].0
 }
 
-fn line_start(buf: &str, cpos: usize) -> usize {
+pub(crate) fn line_start(buf: &str, cpos: usize) -> usize {
     buf[..cpos].rfind('\n').map(|i| i + 1).unwrap_or(0)
 }
 
-fn line_end(buf: &str, cpos: usize) -> usize {
+pub(crate) fn line_end(buf: &str, cpos: usize) -> usize {
     cpos + buf[cpos..].find('\n').unwrap_or(buf.len() - cpos)
 }
 
@@ -1485,7 +1999,7 @@ fn goto_line(buf: &str, line_idx: usize) -> usize {
     pos
 }
 
-fn move_down(buf: &str, cpos: usize) -> usize {
+pub(crate) fn move_down(buf: &str, cpos: usize) -> usize {
     let sol = line_start(buf, cpos);
     let col = cpos - sol;
     let eol = line_end(buf, cpos);
@@ -1498,7 +2012,7 @@ fn move_down(buf: &str, cpos: usize) -> usize {
     next_sol + col.min(next_len)
 }
 
-fn move_up(buf: &str, cpos: usize) -> usize {
+pub(crate) fn move_up(buf: &str, cpos: usize) -> usize {
     let sol = line_start(buf, cpos);
     if sol == 0 {
         return cpos; // Already on first line.
@@ -1571,18 +2085,32 @@ fn text_object_word(
         return None;
     }
     let chars: Vec<(usize, char)> = buf.char_indices().collect();
-    // Find char index for cpos.
     let ci = chars.iter().position(|(i, _)| *i >= cpos)?;
-    let cur_class = char_class(chars[ci].1, mode);
+    let cur_char = chars[ci].1;
+    let cur_class = char_class(cur_char, mode);
 
-    // Expand backward over same class.
+    // Newlines are their own unit — never expand across them.
+    if cur_char == '\n' {
+        let byte_pos = chars[ci].0;
+        return Some((byte_pos, byte_pos + 1));
+    }
+
+    // Expand backward over same class, stopping at newlines.
     let mut start = ci;
-    while start > 0 && char_class(chars[start - 1].1, mode) == cur_class {
+    while start > 0 {
+        let prev = chars[start - 1].1;
+        if prev == '\n' || char_class(prev, mode) != cur_class {
+            break;
+        }
         start -= 1;
     }
-    // Expand forward over same class.
+    // Expand forward over same class, stopping at newlines.
     let mut end = ci;
-    while end + 1 < chars.len() && char_class(chars[end + 1].1, mode) == cur_class {
+    while end + 1 < chars.len() {
+        let next = chars[end + 1].1;
+        if next == '\n' || char_class(next, mode) != cur_class {
+            break;
+        }
         end += 1;
     }
 
@@ -1596,17 +2124,17 @@ fn text_object_word(
     if inner {
         Some((byte_start, byte_end))
     } else {
-        // "a word" includes trailing whitespace, or leading if no trailing.
+        // "a word" includes trailing whitespace (spaces/tabs, not newlines),
+        // or leading whitespace if no trailing.
         let mut a_end = byte_end;
-        while a_end < buf.len() && buf[a_end..].starts_with([' ', '\t']) {
+        while a_end < buf.len() && matches!(buf.as_bytes()[a_end], b' ' | b'\t') {
             a_end += 1;
         }
         if a_end > byte_end {
             Some((byte_start, a_end))
         } else {
-            // No trailing whitespace — include leading.
             let mut a_start = byte_start;
-            while a_start > 0 && buf[..a_start].ends_with([' ', '\t']) {
+            while a_start > 0 && matches!(buf.as_bytes()[a_start - 1], b' ' | b'\t') {
                 a_start -= 1;
             }
             Some((a_start, byte_end))
@@ -1831,10 +2359,11 @@ mod tests {
 
     #[test]
     fn test_change_word() {
+        // cw on a word char behaves like ce (vim special case).
         let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello world");
         vim.handle_key(key('c'), &mut buf, &mut cpos, &mut attachments);
         vim.handle_key(key('w'), &mut buf, &mut cpos, &mut attachments);
-        assert_eq!(buf, "world");
+        assert_eq!(buf, " world");
         assert_eq!(vim.mode(), ViMode::Insert);
     }
 
@@ -2103,5 +2632,536 @@ mod tests {
         vim.handle_key(key('$'), &mut buf, &mut cpos, &mut attachments);
         vim.handle_key(key('p'), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(buf, "hello worldhello ");
+    }
+
+    // ── Visual mode tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_visual_select_and_delete() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello world");
+        // Enter visual mode.
+        vim.handle_key(key('v'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(vim.mode(), ViMode::Visual);
+        // Select "hello" (move to end of word).
+        vim.handle_key(key('e'), &mut buf, &mut cpos, &mut attachments);
+        // Delete selection.
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, " world");
+        assert_eq!(vim.mode(), ViMode::Normal);
+    }
+
+    #[test]
+    fn test_visual_yank() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello world");
+        vim.handle_key(key('v'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('e'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('y'), &mut buf, &mut cpos, &mut attachments);
+        // Buffer unchanged, back to normal mode.
+        assert_eq!(buf, "hello world");
+        assert_eq!(vim.mode(), ViMode::Normal);
+        // Paste at end.
+        vim.handle_key(key('$'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('p'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, "hello worldhello");
+    }
+
+    #[test]
+    fn test_visual_change() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello world");
+        vim.handle_key(key('v'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('e'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('c'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, " world");
+        assert_eq!(vim.mode(), ViMode::Insert);
+    }
+
+    #[test]
+    fn test_visual_line_delete() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("aaa\nbbb\nccc");
+        cpos = 4; // on 'bbb'
+        vim.handle_key(key('V'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(vim.mode(), ViMode::VisualLine);
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, "aaa\nccc");
+        assert_eq!(vim.mode(), ViMode::Normal);
+    }
+
+    #[test]
+    fn test_visual_swap_anchor() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello world");
+        vim.handle_key(key('v'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('w'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(cpos, 6); // cursor at 'w'
+        vim.handle_key(key('o'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(cpos, 0); // cursor swapped to anchor
+    }
+
+    #[test]
+    fn test_visual_esc_returns_to_normal() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello");
+        vim.handle_key(key('v'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(vim.mode(), ViMode::Visual);
+        let esc = KeyEvent {
+            code: KeyCode::Esc,
+            modifiers: KeyModifiers::empty(),
+            kind: KeyEventKind::Press,
+            state: KeyEventState::empty(),
+        };
+        vim.handle_key(esc, &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(vim.mode(), ViMode::Normal);
+    }
+
+    #[test]
+    fn test_visual_tilde() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello world");
+        vim.handle_key(key('v'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('e'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('~'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, "HELLO world");
+    }
+
+    #[test]
+    fn test_visual_switch_modes() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello");
+        vim.handle_key(key('v'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(vim.mode(), ViMode::Visual);
+        vim.handle_key(key('V'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(vim.mode(), ViMode::VisualLine);
+        vim.handle_key(key('v'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(vim.mode(), ViMode::Visual);
+        vim.handle_key(key('v'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(vim.mode(), ViMode::Normal);
+    }
+
+    // ── Visual mode edge cases ──────────────────────────────────────
+
+    #[test]
+    fn test_visual_delete_multiline() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("aaa\nbbb\nccc");
+        // Visual select from 'a' to 'b' on second line.
+        vim.handle_key(key('v'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('j'), &mut buf, &mut cpos, &mut attachments);
+        // Cursor is on 'b' at line 2, col 0 (pos 4).
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
+        // Should delete "aaa\nb" (positions 0..5).
+        assert_eq!(buf, "bb\nccc");
+        assert_eq!(cpos, 0);
+    }
+
+    #[test]
+    fn test_visual_select_backwards() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello world");
+        cpos = 10; // on 'd'
+        vim.handle_key(key('v'), &mut buf, &mut cpos, &mut attachments);
+        // Move backwards.
+        vim.handle_key(key('b'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(cpos, 6); // on 'w'
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
+        // Should delete "world" (positions 6..11).
+        assert_eq!(buf, "hello ");
+    }
+
+    #[test]
+    fn test_visual_line_multiline() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("aaa\nbbb\nccc");
+        // Start on first line.
+        vim.handle_key(key('V'), &mut buf, &mut cpos, &mut attachments);
+        // Extend to second line.
+        vim.handle_key(key('j'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
+        // Should delete lines "aaa\nbbb\n".
+        assert_eq!(buf, "ccc");
+    }
+
+    #[test]
+    fn test_visual_line_last_line() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("aaa\nbbb");
+        cpos = 4; // on 'bbb'
+        vim.handle_key(key('V'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
+        // Delete last line — should remove preceding newline.
+        assert_eq!(buf, "aaa");
+    }
+
+    #[test]
+    fn test_visual_empty_buffer() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("");
+        vim.handle_key(key('v'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(vim.mode(), ViMode::Visual);
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, "");
+        assert_eq!(vim.mode(), ViMode::Normal);
+    }
+
+    #[test]
+    fn test_visual_single_char() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("x");
+        vim.handle_key(key('v'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, "");
+    }
+
+    #[test]
+    fn test_visual_paste_replaces() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello world");
+        // Yank "hello" first.
+        vim.handle_key(key('y'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('w'), &mut buf, &mut cpos, &mut attachments);
+        // Visual select "world".
+        vim.handle_key(key('w'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('v'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('e'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('p'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, "hello hello ");
+    }
+
+    #[test]
+    fn test_visual_join_lines() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("aaa\nbbb\nccc");
+        vim.handle_key(key('V'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('j'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('J'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, "aaa bbb\nccc");
+        assert_eq!(vim.mode(), ViMode::Normal);
+    }
+
+    #[test]
+    fn test_visual_yank_cursor_goes_to_start() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello world");
+        cpos = 6; // on 'w'
+        vim.handle_key(key('v'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('e'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(cpos, 10); // on 'd'
+        vim.handle_key(key('y'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(cpos, 6); // cursor goes back to start of selection
+    }
+
+    #[test]
+    fn test_visual_count_motion() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("one two three four");
+        vim.handle_key(key('v'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('2'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('w'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
+        // 2w from 0 = 8 (start of "three"), visual inclusive of cursor char.
+        assert_eq!(buf, "hree four");
+    }
+
+    #[test]
+    fn test_visual_find_motion() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello world");
+        vim.handle_key(key('v'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('f'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('w'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
+        // Visual from 0 to 'w' (pos 6) inclusive.
+        assert_eq!(buf, "orld");
+    }
+
+    #[test]
+    fn test_visual_dollar_motion() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello world");
+        vim.handle_key(key('v'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('$'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, "");
+    }
+
+    #[test]
+    fn test_visual_range_anchor_after_cursor() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("abcdef");
+        cpos = 3; // on 'd'
+        vim.handle_key(key('v'), &mut buf, &mut cpos, &mut attachments);
+        // Move left so cursor < anchor.
+        vim.handle_key(key('h'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('h'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(cpos, 1); // on 'b'
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
+        // Deletes from pos 1 ('b') to pos 3 ('d') inclusive = "bcd".
+        assert_eq!(buf, "aef");
+    }
+
+    #[test]
+    fn test_visual_uppercase() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello world");
+        vim.handle_key(key('v'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('e'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('U'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, "HELLO world");
+        assert_eq!(vim.mode(), ViMode::Normal);
+    }
+
+    #[test]
+    fn test_visual_lowercase() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("HELLO world");
+        vim.handle_key(key('v'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('e'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('u'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, "hello world");
+    }
+
+    #[test]
+    fn test_visual_line_single_line_buffer() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello");
+        vim.handle_key(key('V'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, "");
+    }
+
+    #[test]
+    fn test_visual_line_first_line() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("aaa\nbbb");
+        vim.handle_key(key('V'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, "bbb");
+    }
+
+    #[test]
+    fn test_visual_undo() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello world");
+        vim.handle_key(key('v'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('e'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, " world");
+        vim.handle_key(key('u'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, "hello world");
+    }
+
+    #[test]
+    fn test_visual_line_yank_and_paste() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("aaa\nbbb\nccc");
+        // Yank first line.
+        vim.handle_key(key('V'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('y'), &mut buf, &mut cpos, &mut attachments);
+        // Paste after last line.
+        vim.handle_key(key('G'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('p'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, "aaa\nbbb\nccc\naaa");
+    }
+
+    #[test]
+    fn test_visual_ctrl_c_passes_through() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello");
+        vim.handle_key(key('v'), &mut buf, &mut cpos, &mut attachments);
+        let result = vim.handle_key(key_ctrl('c'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(result, Action::Passthrough);
+    }
+
+    #[test]
+    fn test_open_line_above() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello");
+        // O opens line above.
+        vim.handle_key(key('O'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, "\nhello");
+        assert_eq!(cpos, 0);
+        assert_eq!(vim.mode(), ViMode::Insert);
+    }
+
+    #[test]
+    fn test_open_line_above_multiline() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("aaa\nbbb");
+        cpos = 4; // on 'bbb'
+        vim.handle_key(key('O'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, "aaa\n\nbbb");
+        assert_eq!(cpos, 4); // on the empty line
+        assert_eq!(vim.mode(), ViMode::Insert);
+    }
+
+    #[test]
+    fn test_visual_gg() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("aaa\nbbb\nccc");
+        cpos = 8; // on 'ccc'
+        vim.handle_key(key('v'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('g'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('g'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(cpos, 0);
+        // Should still be in visual mode with selection from 8 to 0.
+        assert_eq!(vim.mode(), ViMode::Visual);
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, "cc");
+    }
+
+    #[test]
+    fn test_visual_go_end() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("aaa\nbbb\nccc");
+        vim.handle_key(key('v'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('G'), &mut buf, &mut cpos, &mut attachments);
+        // G moves to end, visual selects everything.
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, "");
+    }
+
+    #[test]
+    fn test_visual_line_change_middle() {
+        // Vc on a middle line should clear content, keep the line, enter insert.
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("aaa\nbbb\nccc");
+        cpos = 4; // on 'bbb'
+        vim.handle_key(key('V'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('c'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, "aaa\n\nccc");
+        assert_eq!(vim.mode(), ViMode::Insert);
+    }
+
+    #[test]
+    fn test_visual_join_three_lines() {
+        // VjJ should join all three lines, not stop early.
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("aaa\nbbb\nccc");
+        vim.handle_key(key('V'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('j'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('j'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('J'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, "aaa bbb ccc");
+    }
+
+    #[test]
+    fn test_visual_join_with_leading_spaces() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("aaa\n  bbb\n  ccc");
+        vim.handle_key(key('V'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('j'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('J'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, "aaa bbb\n  ccc");
+    }
+
+    // ── Text object tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_iw_single_line() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello world");
+        cpos = 2; // on 'l' in "hello"
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('i'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('w'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, " world");
+    }
+
+    #[test]
+    fn test_iw_does_not_cross_newline() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello\nworld");
+        cpos = 2; // on 'l' in "hello"
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('i'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('w'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, "\nworld");
+    }
+
+    #[test]
+    fn test_aw_includes_trailing_space() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello world");
+        cpos = 2; // on 'l' in "hello"
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('a'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('w'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, "world");
+    }
+
+    #[test]
+    fn test_aw_does_not_cross_newline() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello\nworld");
+        cpos = 2; // on 'l' in "hello"
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('a'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('w'), &mut buf, &mut cpos, &mut attachments);
+        // No trailing space before newline, so include leading (none) — just the word.
+        assert_eq!(buf, "\nworld");
+    }
+
+    #[test]
+    fn test_viw_selects_word() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello world");
+        cpos = 7; // on 'o' in "world"
+        vim.handle_key(key('v'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('i'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('w'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, "hello ");
+    }
+
+    #[test]
+    fn test_viw_does_not_cross_newline() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello\nworld");
+        cpos = 2; // on 'l' in "hello"
+        vim.handle_key(key('v'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('i'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('w'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, "\nworld");
+    }
+
+    #[test]
+    fn test_iw_on_whitespace() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello   world");
+        cpos = 6; // on a space
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('i'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('w'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, "helloworld");
+    }
+
+    #[test]
+    fn test_iw_on_newline() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello\nworld");
+        cpos = 5; // on '\n'
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('i'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('w'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, "helloworld");
+    }
+
+    #[test]
+    fn test_viw_middle_of_line() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("aaa bbb ccc");
+        cpos = 5; // on second 'b'
+        vim.handle_key(key('v'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('i'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('w'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('d'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, "aaa  ccc");
+    }
+
+    // ── Vim behavioral correctness tests ────────────────────────────
+
+    #[test]
+    fn test_cw_on_word_acts_like_ce() {
+        // cw on a word char should only change to end of word, not include trailing space.
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello world");
+        vim.handle_key(key('c'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('w'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, " world");
+        assert_eq!(vim.mode(), ViMode::Insert);
+    }
+
+    #[test]
+    fn test_cw_on_whitespace_acts_normally() {
+        // cw on whitespace should change to start of next word.
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello   world");
+        cpos = 5; // on first space
+        vim.handle_key(key('c'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('w'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, "helloworld");
+        assert_eq!(vim.mode(), ViMode::Insert);
+    }
+
+    #[test]
+    fn test_semicolon_after_t_not_stuck() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("abcxdefxghi");
+        vim.handle_key(key('t'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('x'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(cpos, 2); // 'c', one before first 'x' at 3
+        vim.handle_key(key(';'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(cpos, 6); // 'f', one before second 'x' at 7
+    }
+
+    #[test]
+    fn test_p_cursor_on_last_pasted_char() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("world");
+        // Yank "world".
+        vim.handle_key(key('y'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('w'), &mut buf, &mut cpos, &mut attachments);
+        // Go to end and paste.
+        vim.handle_key(key('$'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(key('p'), &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, "worldworld");
+        // Cursor should be on last char of pasted "world" = 'd' at position 9.
+        assert_eq!(cpos, 9);
     }
 }

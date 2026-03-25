@@ -37,6 +37,8 @@ pub enum KeyAction {
     MoveWordBackward,
     MoveStartOfLine,
     MoveEndOfLine,
+    MoveUp,
+    MoveDown,
     MoveStartOfBuffer,
     MoveEndOfBuffer,
     HistoryPrev,
@@ -63,6 +65,17 @@ pub enum KeyAction {
 
     // Clipboard
     ClipboardImage,
+
+    // Selection (shift+movement extends selection)
+    SelectLeft,
+    SelectRight,
+    SelectWordForward,
+    SelectWordBackward,
+    SelectStartOfLine,
+    SelectEndOfLine,
+    // Clipboard (system)
+    CopySelection,
+    CutSelection,
 }
 
 // ── Context ──────────────────────────────────────────────────────────────────
@@ -70,7 +83,7 @@ pub enum KeyAction {
 /// Snapshot of app state used for condition matching.
 pub struct KeyContext {
     pub buf_empty: bool,
-    pub vim_normal: bool,
+    pub vim_non_insert: bool,
     pub vim_enabled: bool,
     pub agent_running: bool,
     pub ghost_text_visible: bool,
@@ -100,7 +113,7 @@ impl Cond {
 #[derive(Clone, Copy, Debug)]
 pub struct When {
     buf_empty: Cond,
-    vim_normal: Cond,
+    vim_non_insert: Cond,
     vim_enabled: Cond,
     agent_running: Cond,
     ghost_text: Cond,
@@ -110,7 +123,7 @@ impl When {
     const fn new() -> Self {
         Self {
             buf_empty: Cond::Any,
-            vim_normal: Cond::Any,
+            vim_non_insert: Cond::Any,
             vim_enabled: Cond::Any,
             agent_running: Cond::Any,
             ghost_text: Cond::Any,
@@ -127,13 +140,18 @@ impl When {
         self
     }
 
-    const fn vim_normal(mut self) -> Self {
-        self.vim_normal = Cond::Yes;
+    const fn vim_non_insert(mut self) -> Self {
+        self.vim_non_insert = Cond::Yes;
         self
     }
 
-    const fn not_vim_normal(mut self) -> Self {
-        self.vim_normal = Cond::No;
+    const fn not_vim_non_insert(mut self) -> Self {
+        self.vim_non_insert = Cond::No;
+        self
+    }
+
+    const fn not_vim(mut self) -> Self {
+        self.vim_enabled = Cond::No;
         self
     }
 
@@ -154,7 +172,7 @@ impl When {
 
     fn matches(&self, ctx: &KeyContext) -> bool {
         self.buf_empty.matches(ctx.buf_empty)
-            && self.vim_normal.matches(ctx.vim_normal)
+            && self.vim_non_insert.matches(ctx.vim_non_insert)
             && self.vim_enabled.matches(ctx.vim_enabled)
             && self.agent_running.matches(ctx.agent_running)
             && self.ghost_text.matches(ctx.ghost_text_visible)
@@ -259,7 +277,7 @@ static BINDINGS: &[Binding] = &[
     bind(
         KeyCode::Char('r'),
         CTRL,
-        when().not_vim_normal(),
+        when().not_vim_non_insert(),
         KeyAction::OpenHistorySearch,
     ),
     bind(KeyCode::Char('l'), CTRL, when(), KeyAction::PurgeRedraw),
@@ -277,45 +295,45 @@ static BINDINGS: &[Binding] = &[
     bind(
         KeyCode::Char('j'),
         CTRL,
-        when().vim_normal(),
+        when().vim_non_insert(),
         KeyAction::HistoryNext,
     ),
     bind(
         KeyCode::Char('k'),
         CTRL,
-        when().vim_normal(),
+        when().vim_non_insert(),
         KeyAction::HistoryPrev,
     ),
     bind(
         KeyCode::Char('j'),
         CTRL,
-        when().not_vim_normal(),
+        when().not_vim_non_insert(),
         KeyAction::InsertNewline,
     ),
     // ── Vim half-page scroll (must be before emacs Ctrl+U/D) ────────────
     bind(
         KeyCode::Char('u'),
         CTRL,
-        when().vim_normal(),
+        when().vim_non_insert(),
         KeyAction::VimHalfPageUp,
     ),
     bind(
         KeyCode::Char('d'),
         CTRL,
-        when().vim_normal(),
+        when().vim_non_insert(),
         KeyAction::VimHalfPageDown,
     ),
     // ── Emacs navigation ────────────────────────────────────────────────
     bind(
         KeyCode::Char('a'),
         CTRL,
-        when().not_vim_normal(),
+        when().not_vim_non_insert(),
         KeyAction::MoveStartOfLine,
     ),
     bind(
         KeyCode::Char('e'),
         CTRL,
-        when().not_vim_normal(),
+        when().not_vim_non_insert(),
         KeyAction::MoveEndOfLine,
     ),
     bind(KeyCode::Char('f'), CTRL, when(), KeyAction::MoveRight),
@@ -326,7 +344,7 @@ static BINDINGS: &[Binding] = &[
     bind(
         KeyCode::Char('d'),
         CTRL,
-        when().not_vim_normal(),
+        when().not_vim_non_insert(),
         KeyAction::DeleteCharForward,
     ),
     bind(
@@ -338,56 +356,108 @@ static BINDINGS: &[Binding] = &[
     bind(
         KeyCode::Char('w'),
         CTRL,
-        when().not_vim_normal(),
+        when().not_vim_non_insert(),
         KeyAction::DeleteWordBackward,
     ),
     bind(
         KeyCode::Char('k'),
         CTRL,
-        when().not_vim_normal(),
+        when().not_vim_non_insert(),
         KeyAction::KillToEndOfLine,
     ),
     bind(
         KeyCode::Char('u'),
         CTRL,
-        when().not_vim_normal(),
+        when().not_vim_non_insert(),
         KeyAction::KillToStartOfLine,
     ),
     bind(
         KeyCode::Char('y'),
         CTRL,
-        when().not_vim_normal(),
+        when().not_vim_non_insert(),
         KeyAction::Yank,
     ),
     bind(
         KeyCode::Char('y'),
         ALT,
-        when().not_vim_normal(),
+        when().not_vim_non_insert(),
         KeyAction::YankPop,
     ),
     bind(
         KeyCode::Char('u'),
         ALT,
-        when().not_vim_normal(),
+        when().not_vim_non_insert(),
         KeyAction::UppercaseWord,
     ),
     bind(
         KeyCode::Char('l'),
         ALT,
-        when().not_vim_normal(),
+        when().not_vim_non_insert(),
         KeyAction::LowercaseWord,
     ),
     bind(
         KeyCode::Char('c'),
         ALT,
-        when().not_vim_normal(),
+        when().not_vim_non_insert(),
         KeyAction::CapitalizeWord,
     ),
     bind(
         KeyCode::Char('_'),
         CTRL,
-        when().not_vim_normal(),
+        when().not_vim_non_insert(),
         KeyAction::Undo,
+    ),
+    // ── Selection (shift+movement, non-vim only) ──────────────────────
+    // More-specific combos (shift+alt, shift+ctrl) must come before plain
+    // shift so they match first. Note: Cmd (SUPER) combos are not included
+    // because macOS terminals intercept them for scrollback/tab management.
+    bind(
+        KeyCode::Left,
+        SHIFT.union(ALT),
+        when().not_vim(),
+        KeyAction::SelectWordBackward,
+    ),
+    bind(
+        KeyCode::Right,
+        SHIFT.union(ALT),
+        when().not_vim(),
+        KeyAction::SelectWordForward,
+    ),
+    bind(
+        KeyCode::Left,
+        SHIFT.union(CTRL),
+        when().not_vim(),
+        KeyAction::SelectWordBackward,
+    ),
+    bind(
+        KeyCode::Right,
+        SHIFT.union(CTRL),
+        when().not_vim(),
+        KeyAction::SelectWordForward,
+    ),
+    bind(
+        KeyCode::Left,
+        SHIFT,
+        when().not_vim(),
+        KeyAction::SelectLeft,
+    ),
+    bind(
+        KeyCode::Right,
+        SHIFT,
+        when().not_vim(),
+        KeyAction::SelectRight,
+    ),
+    bind(
+        KeyCode::Home,
+        SHIFT,
+        when().not_vim(),
+        KeyAction::SelectStartOfLine,
+    ),
+    bind(
+        KeyCode::End,
+        SHIFT,
+        when().not_vim(),
+        KeyAction::SelectEndOfLine,
     ),
     // ── Arrow / Home / End navigation ───────────────────────────────────
     bind(KeyCode::Left, ALT, when(), KeyAction::MoveWordBackward),
@@ -397,10 +467,10 @@ static BINDINGS: &[Binding] = &[
     bind(KeyCode::Right, SUPER, when(), KeyAction::MoveEndOfLine),
     bind(KeyCode::Right, NONE, when(), KeyAction::MoveRight),
     bind(KeyCode::Up, SUPER, when(), KeyAction::MoveStartOfBuffer),
-    bind(KeyCode::Up, NONE, when(), KeyAction::HistoryPrev),
+    bind(KeyCode::Up, NONE, when(), KeyAction::MoveUp),
     bind(KeyCode::Char('p'), CTRL, when(), KeyAction::HistoryPrev),
     bind(KeyCode::Down, SUPER, when(), KeyAction::MoveEndOfBuffer),
-    bind(KeyCode::Down, NONE, when(), KeyAction::HistoryNext),
+    bind(KeyCode::Down, NONE, when(), KeyAction::MoveDown),
     bind(KeyCode::Char('n'), CTRL, when(), KeyAction::HistoryNext),
     bind(KeyCode::Home, NONE, when(), KeyAction::MoveStartOfLine),
     bind(KeyCode::End, NONE, when(), KeyAction::MoveEndOfLine),
@@ -427,6 +497,8 @@ static BINDINGS: &[Binding] = &[
     ),
     bind(KeyCode::Backspace, NONE, when(), KeyAction::Backspace),
     // ── Clipboard ───────────────────────────────────────────────────────
+    bind(KeyCode::Char('c'), SUPER, when(), KeyAction::CopySelection),
+    bind(KeyCode::Char('x'), SUPER, when(), KeyAction::CutSelection),
     bind(KeyCode::Char('v'), SUPER, when(), KeyAction::ClipboardImage),
 ];
 
@@ -599,6 +671,10 @@ pub mod hints {
         ),
         ("ctrl+_", "undo"),
         ("ctrl+x ctrl+e", "edit in $EDITOR"),
+        (
+            "shift+\u{2190}/\u{2192}",
+            "select text (shift+alt: by word, shift+home/end: line)",
+        ),
         ("tab", "autocomplete / accept ghost text"),
         ("esc", "dismiss / unqueue messages"),
         ("esc esc", "cancel agent / compaction / rewind"),
@@ -608,7 +684,7 @@ pub mod hints {
         ("ctrl+j / ctrl+k", "history next / prev  (normal mode)"),
         ("ctrl+u / ctrl+d", "half-page up / down  (normal mode)"),
         ("ctrl+r", "redo  (normal mode)"),
-        ("v", "edit in $EDITOR  (normal mode)"),
+        ("v / V", "visual / visual-line selection  (normal mode)"),
     ];
 
     /// Build the help sections for the current mode.
@@ -635,7 +711,7 @@ mod tests {
     fn ctx() -> KeyContext {
         KeyContext {
             buf_empty: true,
-            vim_normal: false,
+            vim_non_insert: false,
             vim_enabled: false,
             agent_running: false,
             ghost_text_visible: false,
@@ -673,9 +749,9 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_u_vim_normal_is_halfpage() {
+    fn ctrl_u_vim_non_insert_is_halfpage() {
         let c = KeyContext {
-            vim_normal: true,
+            vim_non_insert: true,
             vim_enabled: true,
             ..ctx()
         };
@@ -695,9 +771,9 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_r_vim_normal_no_match() {
+    fn ctrl_r_vim_non_insert_no_match() {
         let c = KeyContext {
-            vim_normal: true,
+            vim_non_insert: true,
             vim_enabled: true,
             ..ctx()
         };
@@ -772,6 +848,24 @@ mod tests {
         assert_eq!(
             lookup(KeyCode::Backspace, NONE, &c),
             Some(KeyAction::Backspace)
+        );
+    }
+
+    #[test]
+    fn shift_left_selects() {
+        let c = ctx();
+        assert_eq!(
+            lookup(KeyCode::Left, SHIFT, &c),
+            Some(KeyAction::SelectLeft)
+        );
+    }
+
+    #[test]
+    fn shift_alt_left_selects_word_backward() {
+        let c = ctx();
+        assert_eq!(
+            lookup(KeyCode::Left, SHIFT.union(ALT), &c),
+            Some(KeyAction::SelectWordBackward)
         );
     }
 }

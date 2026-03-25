@@ -570,7 +570,7 @@ fn format_timestamp(epoch_ms: u64) -> String {
 }
 
 /// Copy text to the system clipboard using platform commands.
-fn copy_to_clipboard(text: &str) -> Result<(), String> {
+pub(crate) fn copy_to_clipboard(text: &str) -> Result<(), String> {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
