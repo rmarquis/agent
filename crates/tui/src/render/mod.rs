@@ -1057,8 +1057,11 @@ impl Screen {
                 .take()
                 .unwrap_or_else(|| cursor::position().map(|(_, y)| y).unwrap_or(0))
         };
-        let block_rows = self.history.render(&mut out, term_width());
-        self.prompt.anchor_row = Some(start_row + block_rows);
+        let (w, h) = terminal::size().unwrap_or((80, 24));
+        let block_rows = self.history.render(&mut out, w as usize);
+        // Cap anchor at the last terminal row — scroll-mode rendering may
+        // have pushed past the bottom, making start_row + block_rows overshoot.
+        self.prompt.anchor_row = Some((start_row + block_rows).min(h.saturating_sub(1)));
         if close_sync {
             let _ = out.queue(terminal::EndSynchronizedUpdate);
         } else {
@@ -1081,12 +1084,13 @@ impl Screen {
     fn erase_prompt_inner(&mut self, own_sync: bool) {
         if self.prompt.drawn {
             if let Some(anchor) = self.prompt.anchor_row {
-                let end = anchor + self.prompt.prev_rows;
+                let height = terminal::size().map(|(_, h)| h).unwrap_or(24);
+                let end = (anchor + self.prompt.prev_rows).min(height);
                 let mut out = RenderOut::scroll();
                 if own_sync {
                     let _ = out.queue(terminal::BeginSynchronizedUpdate);
                 }
-                for r in anchor..=end {
+                for r in anchor..end {
                     let _ = out.queue(cursor::MoveTo(0, r));
                     let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
                 }
@@ -1125,13 +1129,13 @@ impl Screen {
         };
         self.history.flushed = 0;
         self.history.last_block_rows = 0;
-        let block_rows = self.history.render(&mut out, term_width());
+        let (w, height) = terminal::size().unwrap_or((80, 24));
+        let block_rows = self.history.render(&mut out, w as usize);
         if !purge {
             // Clear remaining rows individually — Clear(FromCursorDown) at
             // low row numbers causes Ghostty to push the viewport into
             // scrollback.
             let cur_row = start + block_rows;
-            let height = terminal::size().map(|(_, h)| h).unwrap_or(24);
             for row in cur_row..height {
                 let _ = out.queue(cursor::MoveTo(0, row));
                 let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
@@ -1145,9 +1149,9 @@ impl Screen {
         if purge {
             self.has_scrollback = false;
             self.content_start_row = Some(0);
-            self.prompt.anchor_row = Some(block_rows);
+            self.prompt.anchor_row = Some(block_rows.min(height.saturating_sub(1)));
         } else {
-            self.prompt.anchor_row = Some(start + block_rows);
+            self.prompt.anchor_row = Some((start + block_rows).min(height.saturating_sub(1)));
         }
     }
 
