@@ -361,35 +361,201 @@ impl App {
     }
 
     pub(super) fn format_conversation_text(&self) -> String {
-        let mut out = String::new();
-        for msg in &self.history {
-            match msg.role {
-                Role::System | Role::Tool => continue,
-                Role::User => {
-                    if let Some(c) = &msg.content {
-                        out.push_str("User: ");
-                        out.push_str(c.as_text());
-                        out.push_str("\n\n");
-                    }
-                }
-                Role::Assistant => {
-                    if let Some(c) = &msg.content {
-                        if !c.is_empty() {
-                            out.push_str("Assistant: ");
-                            out.push_str(c.as_text());
-                            out.push_str("\n\n");
-                        }
-                    }
-                    if let Some(calls) = &msg.tool_calls {
-                        for tc in calls {
-                            out.push_str(&format!("[Tool call: {}]\n\n", tc.function.name));
-                        }
+        format_conversation_markdown(&self.history, &self.session)
+    }
+}
+
+// ── Markdown export ─────────────────────────────────────────────────────────
+
+fn format_conversation_markdown(
+    history: &[Message],
+    session: &crate::session::Session,
+) -> String {
+    use std::collections::HashMap;
+    use std::fmt::Write;
+
+    // Build lookup: tool_call_id → (content, is_error).
+    let mut tool_results: HashMap<&str, (&str, bool)> = HashMap::new();
+    for msg in history {
+        if msg.role == Role::Tool {
+            if let (Some(id), Some(content)) = (&msg.tool_call_id, &msg.content) {
+                tool_results.insert(id.as_str(), (content.as_text(), msg.is_error));
+            }
+        }
+    }
+
+    let mut out = String::new();
+
+    // Header with session metadata.
+    if let Some(title) = &session.title {
+        let _ = writeln!(out, "# {title}\n");
+    }
+    let mut meta_parts: Vec<String> = Vec::new();
+    if let Some(model) = &session.model {
+        meta_parts.push(format!("**Model:** {model}"));
+    }
+    if let Some(cwd) = &session.cwd {
+        meta_parts.push(format!("**CWD:** `{cwd}`"));
+    }
+    if session.created_at_ms > 0 {
+        meta_parts.push(format!("**Date:** {}", format_timestamp(session.created_at_ms)));
+    }
+    if !meta_parts.is_empty() {
+        let _ = writeln!(out, "{}\n", meta_parts.join(" · "));
+        let _ = writeln!(out, "---\n");
+    }
+
+    for msg in history {
+        match msg.role {
+            Role::System => {
+                let _ = writeln!(out, "## System\n");
+                if let Some(c) = &msg.content {
+                    let text = c.as_text();
+                    // System prompts can be very long — truncate for readability.
+                    if text.len() > 500 {
+                        let _ = writeln!(out, "{}\n\n*({} chars truncated)*\n", &text[..500], text.len() - 500);
+                    } else {
+                        let _ = writeln!(out, "{text}\n");
                     }
                 }
             }
+            Role::User => {
+                let _ = writeln!(out, "## User\n");
+                if let Some(c) = &msg.content {
+                    let _ = writeln!(out, "{}\n", c.text_content());
+                    for label in c.image_labels() {
+                        let _ = writeln!(out, "*{label}*\n");
+                    }
+                }
+            }
+            Role::Assistant => {
+                let _ = writeln!(out, "## Assistant\n");
+
+                // Thinking / reasoning.
+                if let Some(reasoning) = &msg.reasoning_content {
+                    if !reasoning.is_empty() {
+                        let _ = writeln!(out, "<details><summary>thinking</summary>\n");
+                        let _ = writeln!(out, "{reasoning}\n");
+                        let _ = writeln!(out, "</details>\n");
+                    }
+                }
+
+                // Text content.
+                if let Some(c) = &msg.content {
+                    if !c.is_empty() {
+                        let _ = writeln!(out, "{}\n", c.text_content());
+                    }
+                }
+
+                // Tool calls with inline results.
+                if let Some(calls) = &msg.tool_calls {
+                    for tc in calls {
+                        format_tool_call(&mut out, tc, &tool_results);
+                    }
+                }
+            }
+            Role::Tool => {
+                // Already inlined under their tool call — skip.
+            }
         }
-        out.trim_end().to_string()
     }
+
+    out.trim_end().to_string()
+}
+
+fn format_tool_call(
+    out: &mut String,
+    tc: &protocol::ToolCall,
+    tool_results: &std::collections::HashMap<&str, (&str, bool)>,
+) {
+    use std::fmt::Write;
+
+    let name = &tc.function.name;
+    let args: std::collections::HashMap<String, serde_json::Value> =
+        serde_json::from_str(&tc.function.arguments).unwrap_or_default();
+    let summary = engine::tools::tool_arg_summary(name, &args);
+
+    let _ = writeln!(out, "### {name}");
+    if !summary.is_empty() {
+        let _ = writeln!(out, "`{summary}`");
+    }
+
+    // Show full arguments for tools where the summary loses detail.
+    match name.as_str() {
+        "edit_file" => {
+            let file = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
+            let old = args.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
+            let new = args.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
+            if !file.is_empty() {
+                let _ = writeln!(out, "\n```diff");
+                for line in old.lines() {
+                    let _ = writeln!(out, "- {line}");
+                }
+                for line in new.lines() {
+                    let _ = writeln!(out, "+ {line}");
+                }
+                let _ = writeln!(out, "```");
+            }
+        }
+        "write_file" => {
+            let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            if !content.is_empty() {
+                let ext = summary.rsplit('.').next().unwrap_or("");
+                let _ = writeln!(out, "\n```{ext}");
+                let _ = writeln!(out, "{content}");
+                let _ = writeln!(out, "```");
+            }
+        }
+        "bash" => {
+            let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+            if cmd.contains('\n') {
+                let _ = writeln!(out, "\n```bash\n{cmd}\n```");
+            }
+        }
+        _ => {}
+    }
+
+    // Inline the tool result.
+    if let Some((result_text, is_error)) = tool_results.get(tc.id.as_str()) {
+        let _ = writeln!(out);
+        if *is_error {
+            let _ = writeln!(out, "**Error:**");
+        }
+        let trimmed = result_text.trim();
+        if trimmed.is_empty() {
+            let _ = writeln!(out, "*(empty)*\n");
+        } else if trimmed.len() > 2000 {
+            let _ = writeln!(out, "```\n{}\n```\n", &trimmed[..2000]);
+            let _ = writeln!(out, "*({} chars truncated)*\n", trimmed.len() - 2000);
+        } else {
+            let _ = writeln!(out, "```\n{trimmed}\n```\n");
+        }
+    } else {
+        let _ = writeln!(out);
+    }
+}
+
+fn format_timestamp(epoch_ms: u64) -> String {
+    let s = epoch_ms / 1000;
+    // Days since Unix epoch.
+    let days = s / 86400;
+    let time = s % 86400;
+    let h = time / 3600;
+    let m = (time % 3600) / 60;
+
+    // Civil date from day count (algorithm from Howard Hinnant).
+    let z = days as i64 + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z.rem_euclid(146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if mo <= 2 { y + 1 } else { y };
+
+    format!("{y:04}-{mo:02}-{d:02} {h:02}:{m:02} UTC")
 }
 
 /// Copy text to the system clipboard using platform commands.
