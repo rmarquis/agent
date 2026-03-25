@@ -51,18 +51,12 @@ impl Tool for ExitPlanModeTool {
             match crate::plan::save(ctx.session_dir, ctx.session_id, &summary) {
                 Ok(path) => {
                     let display_path = path.display().to_string();
-                    ToolResult {
-                        content: format!(
-                            "Plan saved to {display_path}\n\n{summary}\n\n\
+                    ToolResult::ok(format!(
+                        "Plan saved to {display_path}\n\n{summary}\n\n\
                              The user approved this plan. Proceed with the implementation now."
-                        ),
-                        is_error: false,
-                    }
+                    ))
                 }
-                Err(e) => ToolResult {
-                    content: format!("Failed to save plan: {e}\n\n{summary}"),
-                    is_error: true,
-                },
+                Err(e) => ToolResult::err(format!("Failed to save plan: {e}\n\n{summary}")),
             }
         })
     }

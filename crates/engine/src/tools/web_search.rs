@@ -46,18 +46,12 @@ impl Tool for WebSearchTool {
 fn run_search(args: &HashMap<String, Value>) -> ToolResult {
     let query = str_arg(args, "query");
     if query.is_empty() {
-        return ToolResult {
-            content: "Query cannot be empty".into(),
-            is_error: true,
-        };
+        return ToolResult::err("Query cannot be empty");
     }
 
     let cache_key = format!("search:{query}");
     if let Some(cached) = web_cache::get(&cache_key) {
-        return ToolResult {
-            content: cached,
-            is_error: false,
-        };
+        return ToolResult::ok(cached);
     }
 
     let search_query = query.clone();
@@ -94,26 +88,13 @@ fn run_search(args: &HashMap<String, Value>) -> ToolResult {
 
     let html = match fetch_result {
         Ok(Ok(h)) => h,
-        Ok(Err(e)) => {
-            return ToolResult {
-                content: format!("Search failed: {e}"),
-                is_error: true,
-            }
-        }
-        Err(_) => {
-            return ToolResult {
-                content: "Search thread panicked".into(),
-                is_error: true,
-            }
-        }
+        Ok(Err(e)) => return ToolResult::err(format!("Search failed: {e}")),
+        Err(_) => return ToolResult::err("Search thread panicked"),
     };
 
     let results = parse_ddg_results(&html);
     if results.is_empty() {
-        return ToolResult {
-            content: "No results found".into(),
-            is_error: false,
-        };
+        return ToolResult::ok("No results found");
     }
 
     let mut output = String::new();
@@ -128,10 +109,7 @@ fn run_search(args: &HashMap<String, Value>) -> ToolResult {
     let output = output.trim_end().to_string();
     web_cache::put(&cache_key, &output);
 
-    ToolResult {
-        content: output,
-        is_error: false,
-    }
+    ToolResult::ok(output)
 }
 
 struct SearchResult {

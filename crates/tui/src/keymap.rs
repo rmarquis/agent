@@ -624,6 +624,7 @@ pub mod hints {
     }
     pub const DD_PENDING: &str = "press d to confirm delete";
     pub const KILL_PROC: &str = "\u{232b}: kill selected";
+    pub const BACK: &str = "esc: back";
     pub const NEXT_Q: &str = "tab: next question";
 
     /// Build a hint line from fragments.

@@ -30,6 +30,40 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+// ── Tracked agent state ──────────────────────────────────────────────────────
+
+/// A single tool call recorded from a subagent's event stream.
+#[derive(Clone)]
+pub struct AgentToolEntry {
+    pub call_id: String,
+    pub tool_name: String,
+    pub summary: String,
+    pub status: ToolStatus,
+    pub elapsed: Option<Duration>,
+}
+
+/// State for a spawned subagent (blocking or background).
+pub struct TrackedAgent {
+    pub agent_id: String,
+    pub pid: u32,
+    pub prompt: Arc<String>,
+    pub slug: Option<String>,
+    pub event_rx: tokio::sync::mpsc::UnboundedReceiver<EngineEvent>,
+    /// Completed tool calls (for /agents dialog and blocking block rendering).
+    pub tool_calls: Vec<AgentToolEntry>,
+    pub status: AgentTrackStatus,
+    /// Whether the parent LLM is waiting for this agent (blocking spawn).
+    pub blocking: bool,
+    pub started_at: Instant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentTrackStatus {
+    Working,
+    Idle,
+    Error,
+}
+
 // ── App ──────────────────────────────────────────────────────────────────────
 
 pub struct App {
@@ -48,6 +82,8 @@ pub struct App {
     exec_rx: Option<tokio::sync::mpsc::UnboundedReceiver<commands::ExecEvent>>,
     exec_kill: Option<std::sync::Arc<tokio::sync::Notify>>,
     pub queued_messages: Vec<String>,
+    /// Agent messages waiting to trigger a turn.
+    pending_agent_messages: Vec<protocol::Message>,
     /// Session-scoped auto-approvals (cleared on /clear, /new, rewind).
     pub session_approved: HashMap<String, Vec<glob::Pattern>>,
     pub session_approved_dirs: Vec<PathBuf>,
@@ -68,6 +104,13 @@ pub struct App {
     pub show_prediction: bool,
     pub show_slug: bool,
     pub restrict_to_workspace: bool,
+    pub multi_agent: bool,
+    /// Human-readable name for this agent.
+    pub agent_id: String,
+    /// All tracked subagents (blocking and background).
+    pub agents: Vec<TrackedAgent>,
+    /// Shared agent snapshots for live dialog updates.
+    pub agent_snapshots: render::SharedSnapshots,
     pub available_models: Vec<crate::config::ResolvedModel>,
     pub engine: EngineHandle,
     permissions: Arc<Permissions>,
@@ -306,6 +349,7 @@ impl App {
         input_prediction: bool,
         task_slug: bool,
         restrict_to_workspace: bool,
+        multi_agent: bool,
         reasoning_effort: protocol::ReasoningEffort,
         reasoning_cycle: Vec<protocol::ReasoningEffort>,
         mode_cycle: Vec<protocol::Mode>,
@@ -343,6 +387,7 @@ impl App {
         } else {
             reasoning_effort
         };
+        crate::completer::set_multi_agent(multi_agent);
         let mut screen = Screen::new();
         screen.set_model_label(model.clone());
         screen.set_reasoning_effort(reasoning_effort);
@@ -373,6 +418,7 @@ impl App {
             exec_rx: None,
             exec_kill: None,
             queued_messages: Vec::new(),
+            pending_agent_messages: Vec::new(),
             session_approved: HashMap::new(),
             session_approved_dirs: Vec::new(),
             workspace_approved,
@@ -388,6 +434,10 @@ impl App {
             show_prediction: input_prediction,
             show_slug: task_slug,
             restrict_to_workspace,
+            multi_agent,
+            agent_id: String::new(),
+            agents: Vec::new(),
+            agent_snapshots: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             available_models,
             engine,
             permissions,
@@ -616,6 +666,20 @@ impl App {
                 }
             }
 
+            // ── Auto-start from pending agent messages ─────────────────
+            if agent.is_none() && !self.pending_agent_messages.is_empty() {
+                let msgs = std::mem::take(&mut self.pending_agent_messages);
+                self.history.extend(msgs);
+                self.screen.erase_prompt();
+                agent = Some(self.begin_agent_message_turn());
+            }
+
+            // ── Drain spawned children → track agents ─────────────────────
+            self.drain_spawned_children();
+
+            // ── Drain subagent events ────────────────────────────────────
+            self.drain_agent_events();
+
             // ── Show deferred dialog once user stops typing ──────────────
             // If agent was cancelled while a dialog was deferred, discard it.
             if agent.is_none() && deferred_dialog.is_some() {
@@ -660,8 +724,9 @@ impl App {
                 if redirtied {
                     d.mark_dirty();
                 }
-                let sync = self.screen.take_sync_started();
-                d.draw(self.screen.dialog_row(), sync);
+                let scr = &mut self.screen;
+                let sync = scr.take_sync_started();
+                d.draw(scr.dialog_row(), sync);
                 self.screen.sync_dialog_anchor(d.anchor_row());
             }
 
@@ -691,8 +756,9 @@ impl App {
                     let redirtied = self.tick(agent.is_some(), active_dialog.is_some());
                     if let Some(d) = active_dialog.as_mut() {
                         if redirtied { d.mark_dirty(); }
-                        let sync = self.screen.take_sync_started();
-                        d.draw(self.screen.dialog_row(), sync);
+                        let scr = &mut self.screen;
+                        let sync = scr.take_sync_started();
+                        d.draw(scr.dialog_row(), sync);
                         self.screen.sync_dialog_anchor(d.anchor_row());
                     }
                 }
@@ -721,8 +787,9 @@ impl App {
                     let redirtied = self.tick(agent.is_some(), active_dialog.is_some());
                     if let Some(d) = active_dialog.as_mut() {
                         if redirtied { d.mark_dirty(); }
-                        let sync = self.screen.take_sync_started();
-                        d.draw(self.screen.dialog_row(), sync);
+                        let scr = &mut self.screen;
+                        let sync = scr.take_sync_started();
+                        d.draw(scr.dialog_row(), sync);
                     }
                 }
 
@@ -759,6 +826,10 @@ impl App {
                     if self.screen.has_active_exec() {
                         self.screen.mark_dirty();
                     }
+                    // Redraw if any background agent's block may need updating.
+                    if self.agents.iter().any(|a| a.status == AgentTrackStatus::Working) {
+                        self.screen.mark_dirty();
+                    }
                 }
             }
         }
@@ -769,7 +840,10 @@ impl App {
         }
         self.save_session();
 
-        self.screen.move_cursor_past_prompt();
+        // If no messages were ever sent, preserve the final prompt/tab bar on exit.
+        // When there is session history, clear below for a clean resume hint area.
+        let clear_below = !self.session.messages.is_empty();
+        self.screen.move_cursor_past_prompt(clear_below);
         let _ = io::stdout().execute(DisableBracketedPaste);
         terminal::disable_raw_mode().ok();
     }
@@ -882,6 +956,239 @@ impl App {
         println!();
     }
 
+    // ── Subagent mode ────────────────────────────────────────────────────
+
+    fn shutdown_subagent(&mut self, parent_pid: u32) {
+        eprintln!("[subagent] parent {parent_pid} is dead, exiting");
+        engine::registry::cleanup_self(std::process::id());
+    }
+
+    /// Forward an inter-agent message: emit to stdout and inject into engine.
+    fn forward_agent_message(&self, from_id: &str, from_slug: &str, message: &str) {
+        emit_json(&EngineEvent::AgentMessage {
+            from_id: from_id.to_string(),
+            from_slug: from_slug.to_string(),
+            message: message.to_string(),
+        });
+        self.engine.send(UiCommand::AgentMessage {
+            from_id: from_id.to_string(),
+            from_slug: from_slug.to_string(),
+            message: message.to_string(),
+        });
+    }
+
+    /// Send a Btw query to the engine on behalf of a querying peer.
+    fn send_btw_query(&self, question: String) {
+        self.engine.send(UiCommand::Btw {
+            question,
+            history: self.history.clone(),
+            model: self.model.clone(),
+            reasoning_effort: self.reasoning_effort,
+            api_base: Some(self.api_base.clone()),
+            api_key: Some(self.api_key()),
+        });
+    }
+
+    /// Run as a persistent subagent. Each `EngineEvent` is written to
+    /// stdout as a JSON line so the parent can parse and render it.
+    /// Processes the initial message, then loops: go idle → wait for
+    /// messages → run next turn → repeat.
+    pub async fn run_subagent(
+        &mut self,
+        initial_message: String,
+        parent_pid: u32,
+        mut socket_rx: tokio::sync::mpsc::UnboundedReceiver<engine::socket::IncomingMessage>,
+    ) {
+        let parent_socket = engine::registry::read_entry(parent_pid)
+            .ok()
+            .map(|e| std::path::PathBuf::from(&e.socket_path));
+        let my_pid = std::process::id();
+        let my_agent_id = engine::registry::read_entry(my_pid)
+            .ok()
+            .map(|e| e.agent_id)
+            .unwrap_or_default();
+
+        // Run the initial turn.
+        self.run_subagent_turn(
+            Content::text(initial_message),
+            &mut socket_rx,
+            parent_pid,
+            parent_socket.as_deref(),
+            &my_agent_id,
+        )
+        .await;
+
+        // Persistent loop: wait for incoming messages or parent death.
+        loop {
+            let parent_check = tokio::time::sleep(std::time::Duration::from_secs(5));
+            tokio::pin!(parent_check);
+
+            tokio::select! {
+                Some(incoming) = socket_rx.recv() => {
+                    match incoming {
+                        engine::socket::IncomingMessage::Message { from_id, from_slug, message } => {
+                            self.forward_agent_message(&from_id, &from_slug, &message);
+                            self.history
+                                .push(protocol::Message::agent(&from_id, &from_slug, &message));
+                            self.run_subagent_turn(
+                                Content::text(""),
+                                &mut socket_rx,
+                                parent_pid,
+                                parent_socket.as_deref(),
+                                &my_agent_id,
+                            )
+                            .await;
+                        }
+                        engine::socket::IncomingMessage::Query { from_id: _, question, reply_tx } => {
+                            self.send_btw_query(question);
+                            while let Some(ev) = self.engine.recv().await {
+                                emit_json(&ev);
+                                if let EngineEvent::BtwResponse { content } = ev {
+                                    let _ = reply_tx.send(content);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                _ = &mut parent_check => {
+                    if !engine::registry::is_pid_alive(parent_pid) {
+                        self.shutdown_subagent(parent_pid);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn run_subagent_turn(
+        &mut self,
+        content: Content,
+        socket_rx: &mut tokio::sync::mpsc::UnboundedReceiver<engine::socket::IncomingMessage>,
+        parent_pid: u32,
+        parent_socket: Option<&std::path::Path>,
+        my_agent_id: &str,
+    ) {
+        let my_pid = std::process::id();
+        engine::registry::update_status(my_pid, engine::registry::AgentStatus::Working);
+
+        // Generate title/slug for the subagent.
+        let text = content.text_content();
+        if self.session.slug.is_none() && !text.is_empty() {
+            self.engine.send(UiCommand::GenerateTitle {
+                user_messages: vec![text],
+                model: self.model.clone(),
+                api_base: Some(self.api_base.clone()),
+                api_key: Some(self.api_key()),
+            });
+        }
+
+        let turn_id = self.next_turn_id;
+        self.next_turn_id += 1;
+
+        self.engine.send(UiCommand::StartTurn {
+            turn_id,
+            content,
+            mode: self.mode,
+            model: self.model.clone(),
+            reasoning_effort: self.reasoning_effort,
+            history: self.history.clone(),
+            api_base: Some(self.api_base.clone()),
+            api_key: Some(self.api_key()),
+            session_id: self.session.id.clone(),
+            session_dir: crate::session::dir_for(&self.session),
+            model_config_overrides: None,
+            permission_overrides: None,
+        });
+
+        let mut pending_query_tx: Option<tokio::sync::oneshot::Sender<String>> = None;
+
+        loop {
+            let parent_check = tokio::time::sleep(std::time::Duration::from_secs(5));
+            tokio::pin!(parent_check);
+
+            tokio::select! {
+                Some(incoming) = socket_rx.recv() => {
+                    match incoming {
+                        engine::socket::IncomingMessage::Message { from_id, from_slug, message } => {
+                            self.forward_agent_message(&from_id, &from_slug, &message);
+                        }
+                        engine::socket::IncomingMessage::Query { from_id: _, question, reply_tx } => {
+                            self.send_btw_query(question);
+                            pending_query_tx = Some(reply_tx);
+                        }
+                    }
+                }
+                _ = &mut parent_check => {
+                    if !engine::registry::is_pid_alive(parent_pid) {
+                        self.shutdown_subagent(parent_pid);
+                        return;
+                    }
+                }
+                maybe_ev = self.engine.recv() => {
+                    let Some(ev) = maybe_ev else {
+                        break;
+                    };
+
+                    // Forward every event to stdout as JSON.
+                    emit_json(&ev);
+
+                    // Handle side effects for events that need them.
+                    match ev {
+                        EngineEvent::RequestPermission { request_id, .. } => {
+                            let approved = self.mode == Mode::Yolo;
+                            self.engine.send(UiCommand::PermissionDecision {
+                                request_id,
+                                approved,
+                                message: None,
+                            });
+                        }
+                        EngineEvent::RequestAnswer { request_id, .. } => {
+                            self.engine.send(UiCommand::QuestionAnswer {
+                                request_id,
+                                answer: Some("User is not available (subagent mode).".into()),
+                            });
+                        }
+                        EngineEvent::Messages { messages, .. } => {
+                            self.history = messages;
+                        }
+                        EngineEvent::BtwResponse { content } => {
+                            if let Some(tx) = pending_query_tx.take() {
+                                let _ = tx.send(content);
+                            }
+                        }
+                        EngineEvent::TitleGenerated { title, slug } => {
+                            self.session.title = Some(title);
+                            self.session.slug = Some(slug.clone());
+                            engine::registry::update_slug(my_pid, &slug);
+                        }
+                        EngineEvent::TurnError { .. } => {
+                            break;
+                        }
+                        EngineEvent::TurnComplete { messages, .. } => {
+                            self.history = messages;
+
+                            // Auto-return last assistant message to parent.
+                            if let Some(socket) = parent_socket {
+                                if let Some(last_asst) = self.history.iter().rev().find(|m| m.role == protocol::Role::Assistant) {
+                                    let text = last_asst.content.as_ref().map(|c| c.text_content()).unwrap_or_default();
+                                    if !text.is_empty() {
+                                        let slug = self.session.slug.as_deref().unwrap_or("");
+                                        let _ = engine::socket::send_message(socket, my_agent_id, slug, &text).await;
+                                    }
+                                }
+                            }
+
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        engine::registry::update_status(my_pid, engine::registry::AgentStatus::Idle);
+    }
+
     fn open_blocking_dialog(
         &mut self,
         mut dialog: Box<dyn render::Dialog>,
@@ -892,13 +1199,15 @@ impl App {
         // subsequent tool overlay + dialog draw is part of the same
         // atomic terminal update — no flicker between block flush and
         // dialog appearance.
-        self.screen.render_pending_blocks_for_dialog();
+        let scr = &mut self.screen;
+        scr.render_pending_blocks_for_dialog();
         let height = crossterm::terminal::size().map(|(_, h)| h).unwrap_or(24);
-        let fits = self.screen.active_tool_rows() + dialog.height() <= height;
-        if !fits {
-            self.screen.erase_prompt_nosync();
-        }
-        self.screen.set_show_tool_in_dialog(fits);
+        let fits = scr.active_tool_rows() + dialog.height() <= height;
+        // Always clear the prompt section before drawing a blocking dialog.
+        // Keeping old prompt rows (including tab bar) around and relying on
+        // later overlay redraws can leave stale lines on some terminals.
+        scr.erase_prompt_nosync();
+        scr.set_show_tool_in_dialog(fits);
         // Share the kill ring so Ctrl+K/Y work across input ↔ dialog.
         dialog.set_kill_ring(self.input.take_kill_ring());
         *active_dialog = Some(dialog);
@@ -913,10 +1222,24 @@ where
     std::future::poll_fn(|cx| Pin::new(&mut *stream).poll_next(cx)).await
 }
 
-// ── Headless logging helpers ─────────────────────────────────────────────────
+// ── Streaming subagent helper ────────────────────────────────────────────────
+
+/// Write a single `EngineEvent` as a JSON line to stdout.
+fn emit_json(ev: &EngineEvent) {
+    // unwrap is safe: EngineEvent derives Serialize and all variants are
+    // representable as JSON.
+    println!("{}", serde_json::to_string(ev).unwrap());
+}
+
+// ── Headless / subagent log helpers ─────────────────────────────────────────
+//
+// Bare-minimum style. Assistant text flows undecorated; only tool lifecycle
+// gets markers. Thinking is dim+italic. Colors match the TUI theme.
+// Respects NO_COLOR, TERM=dumb, and non-TTY stderr.
+
+use std::sync::OnceLock;
 
 fn stderr_supports_color() -> bool {
-    use std::sync::OnceLock;
     static RESULT: OnceLock<bool> = OnceLock::new();
     *RESULT.get_or_init(|| {
         use std::io::IsTerminal;
@@ -926,6 +1249,8 @@ fn stderr_supports_color() -> bool {
         if std::env::var("TERM").as_deref() == Ok("dumb") {
             return false;
         }
+        // Subagents have stderr piped to a log file, but the parent TUI
+        // renders the ANSI sequences — so honor FORCE_COLOR.
         if std::env::var_os("FORCE_COLOR").is_some() {
             return true;
         }
@@ -988,7 +1313,7 @@ fn log_tool_start(tool_name: &str, summary: &str) {
 }
 
 /// Max lines of tool output to show (tail). Matches the TUI's
-/// `render_bash_output` limit.
+/// `render_wrapped_output` limit.
 const MAX_OUTPUT_LINES: usize = 20;
 
 fn log_tool_output(chunk: &str) {
@@ -1010,6 +1335,7 @@ fn log_tool_finish(is_error: bool, content: &str, elapsed_ms: Option<u64>) {
     let r = reset();
     if is_error {
         let c = ansi_fg(crate::theme::ERROR);
+        // Trim long error output the same way.
         let lines: Vec<&str> = content.lines().collect();
         let total = lines.len();
         if total > MAX_OUTPUT_LINES {

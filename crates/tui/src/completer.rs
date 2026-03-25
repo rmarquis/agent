@@ -1,5 +1,12 @@
 use std::collections::HashSet;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static MULTI_AGENT_ENABLED: AtomicBool = AtomicBool::new(false);
+
+pub fn set_multi_agent(enabled: bool) {
+    MULTI_AGENT_ENABLED.store(enabled, Ordering::Relaxed);
+}
 
 #[derive(Clone)]
 pub struct CompletionItem {
@@ -106,14 +113,17 @@ impl Completer {
             ("btw", "ask a side question"),
             ("permissions", "manage session permissions"),
             ("ps", "manage background processes"),
+            ("agents", "manage running agents"),
             ("exit", "exit the app"),
             ("quit", "exit the app"),
         ]
     }
 
     pub fn commands(anchor: usize) -> Self {
+        let multi_agent = MULTI_AGENT_ENABLED.load(Ordering::Relaxed);
         let mut all_items: Vec<CompletionItem> = Self::command_items()
             .iter()
+            .filter(|&&(label, _)| label != "agents" || multi_agent)
             .map(|&(label, desc)| CompletionItem {
                 label: label.into(),
                 description: Some(desc.into()),

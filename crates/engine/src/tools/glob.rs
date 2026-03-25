@@ -62,21 +62,12 @@ impl Tool for GlobTool {
                             entries.into_iter().map(|(_, path)| path).collect();
 
                         if matches.is_empty() {
-                            ToolResult {
-                                content: "no matches found".into(),
-                                is_error: false,
-                            }
+                            ToolResult::ok("no matches found")
                         } else {
-                            ToolResult {
-                                content: matches.join("\n"),
-                                is_error: false,
-                            }
+                            ToolResult::ok(matches.join("\n"))
                         }
                     }
-                    Err(e) => ToolResult {
-                        content: e.to_string(),
-                        is_error: true,
-                    },
+                    Err(e) => ToolResult::err(e.to_string()),
                 }
             })
         })

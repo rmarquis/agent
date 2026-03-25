@@ -6,8 +6,13 @@ mod edit_file;
 mod exit_plan_mode;
 mod glob;
 mod grep;
+mod list_agents;
+mod message_agent;
 mod notebook;
+mod peek_agent;
 mod read_file;
+mod spawn_agent;
+mod stop_agent;
 mod web_cache;
 mod web_fetch;
 mod web_search;
@@ -36,6 +41,7 @@ pub use glob::GlobTool;
 pub use grep::GrepTool;
 pub use notebook::NotebookEditTool;
 pub use read_file::ReadFileTool;
+pub use spawn_agent::AgentMessageNotification;
 pub use web_fetch::WebFetchTool;
 pub use web_search::WebSearchTool;
 pub use write_file::WriteFileTool;
@@ -43,6 +49,31 @@ pub use write_file::WriteFileTool;
 pub struct ToolResult {
     pub content: String,
     pub is_error: bool,
+    /// Structured metadata passed through to ToolOutcome for machine-readable data.
+    pub metadata: Option<serde_json::Value>,
+}
+
+impl ToolResult {
+    pub fn ok(content: impl Into<String>) -> Self {
+        Self {
+            content: content.into(),
+            is_error: false,
+            metadata: None,
+        }
+    }
+
+    pub fn err(content: impl Into<String>) -> Self {
+        Self {
+            content: content.into(),
+            is_error: true,
+            metadata: None,
+        }
+    }
+
+    pub fn with_metadata(mut self, metadata: serde_json::Value) -> Self {
+        self.metadata = Some(metadata);
+        self
+    }
 }
 
 /// Context provided to tools during execution, giving them access to
@@ -172,7 +203,7 @@ pub fn tool_arg_summary(tool_name: &str, args: &HashMap<String, Value>) -> Strin
         }
         "web_fetch" => str_arg(args, "url"),
         "web_search" => str_arg(args, "query"),
-        "exit_plan_mode" => "plan ready".to_string(),
+        "exit_plan_mode" => "plan ready".into(),
         "read_process_output" | "stop_process" => str_arg(args, "id"),
         "ask_user_question" => {
             let count = args
@@ -181,6 +212,31 @@ pub fn tool_arg_summary(tool_name: &str, args: &HashMap<String, Value>) -> Strin
                 .map(|a| a.len())
                 .unwrap_or(0);
             format!("{} question{}", count, if count == 1 { "" } else { "s" })
+        }
+        "spawn_agent" => {
+            let prompt = str_arg(args, "prompt");
+            prompt.lines().next().unwrap_or("").trim().to_string()
+        }
+        "message_agent" => {
+            let targets: Vec<String> = args
+                .get("targets")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let msg = str_arg(args, "message");
+            let first_line = msg.lines().next().unwrap_or("").trim().to_string();
+            format!("{} {first_line}", targets.join(", "))
+        }
+        "stop_agent" => str_arg(args, "target"),
+        "list_agents" => String::new(),
+        "peek_agent" => {
+            let target = str_arg(args, "target");
+            let question = str_arg(args, "question");
+            format!("{target} {question}")
         }
         _ => String::new(),
     }
@@ -281,24 +337,22 @@ pub(crate) fn run_command_with_timeout(
                 return ToolResult {
                     content: result,
                     is_error: !status.success(),
+                    metadata: None,
                 };
             }
             Ok(None) => {
                 if start.elapsed() >= timeout {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return ToolResult {
-                        content: format!("timed out after {:.0}s", timeout.as_secs_f64()),
-                        is_error: true,
-                    };
+                    return ToolResult::err(format!(
+                        "timed out after {:.0}s",
+                        timeout.as_secs_f64()
+                    ));
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
             Err(e) => {
-                return ToolResult {
-                    content: e.to_string(),
-                    is_error: true,
-                };
+                return ToolResult::err(e.to_string());
             }
         }
     }
@@ -317,6 +371,42 @@ pub type FileHashes = Arc<Mutex<HashMap<String, u64>>>;
 
 pub fn new_file_hashes() -> FileHashes {
     Arc::new(Mutex::new(HashMap::new()))
+}
+
+/// Acquire an exclusive, non-blocking advisory lock on the given file path.
+/// Returns `Ok(guard)` on success. Returns `Err(message)` if the file is
+/// locked by another process (EWOULDBLOCK) or on any other I/O error.
+/// The lock is released when the guard is dropped.
+#[cfg(unix)]
+pub(crate) fn try_flock(path: &str) -> Result<FlockGuard, String> {
+    use std::os::unix::io::AsRawFd;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|e| e.to_string())?;
+    let fd = file.as_raw_fd();
+    let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+    if ret != 0 {
+        let err = std::io::Error::last_os_error();
+        if err.kind() == std::io::ErrorKind::WouldBlock {
+            return Err("File is currently being edited by another agent, try again later.".into());
+        }
+        return Err(format!("flock error: {err}"));
+    }
+    Ok(FlockGuard { _file: file })
+}
+
+#[cfg(not(unix))]
+pub(crate) fn try_flock(_path: &str) -> Result<FlockGuard, String> {
+    Ok(FlockGuard { _file: None })
+}
+
+pub(crate) struct FlockGuard {
+    #[cfg(unix)]
+    _file: std::fs::File,
+    #[cfg(not(unix))]
+    _file: Option<()>,
 }
 
 /// Per-path locks that serialize concurrent file-mutating operations.
@@ -342,7 +432,40 @@ impl FileLocks {
     }
 }
 
-pub fn build_tools(processes: ProcessRegistry) -> ToolRegistry {
+/// A handle to a spawned child process, carrying the piped stdout.
+pub struct SpawnedChild {
+    pub agent_id: String,
+    pub pid: u32,
+    pub stdout: std::process::ChildStdout,
+    /// The prompt given to the subagent (displayed as the initial user message).
+    pub prompt: String,
+    /// Whether the parent is waiting for this agent to finish (blocking spawn).
+    pub blocking: bool,
+}
+
+/// Configuration for multi-agent tool registration.
+pub struct MultiAgentToolConfig {
+    pub scope: String,
+    pub pid: u32,
+    pub agent_id: String,
+    pub depth: u8,
+    pub max_depth: u8,
+    pub max_agents: u8,
+    pub parent_pid: Option<u32>,
+    /// Shared mutable slug — updated by title generation, read by message_agent.
+    pub slug: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// API config for spawned subagents.
+    pub api_base: String,
+    pub api_key_env: String,
+    pub model: String,
+    pub provider_type: String,
+    /// Broadcast channel for agent message notifications (used by blocking spawn).
+    pub agent_msg_tx: Option<tokio::sync::broadcast::Sender<AgentMessageNotification>>,
+    /// Channel for sending spawned child handles (stdout pipes) to the parent.
+    pub spawned_tx: Option<mpsc::UnboundedSender<SpawnedChild>>,
+}
+
+pub fn build_tools(processes: ProcessRegistry, ma: Option<MultiAgentToolConfig>) -> ToolRegistry {
     let hashes = new_file_hashes();
     let mut r = ToolRegistry::new();
     r.register(Box::new(ReadFileTool {
@@ -370,5 +493,37 @@ pub fn build_tools(processes: ProcessRegistry) -> ToolRegistry {
     r.register(Box::new(StopProcessTool {
         registry: processes,
     }));
+
+    // Multi-agent tools (conditionally registered).
+    if let Some(ma) = ma {
+        r.register(Box::new(list_agents::ListAgentsTool {
+            scope: ma.scope.clone(),
+            my_pid: ma.pid,
+        }));
+        r.register(Box::new(message_agent::MessageAgentTool {
+            my_id: ma.agent_id.clone(),
+            my_slug: ma.slug,
+        }));
+        r.register(Box::new(peek_agent::PeekAgentTool {
+            my_id: ma.agent_id.clone(),
+        }));
+        if ma.depth < ma.max_depth {
+            r.register(Box::new(spawn_agent::SpawnAgentTool {
+                scope: ma.scope.clone(),
+                my_pid: ma.pid,
+                depth: ma.depth,
+                max_agents: ma.max_agents,
+                api_base: ma.api_base.clone(),
+                api_key_env: ma.api_key_env.clone(),
+                model: ma.model.clone(),
+                provider_type: ma.provider_type.clone(),
+                spawned_tx: ma.spawned_tx.clone(),
+                agent_msg_tx: ma.agent_msg_tx.clone(),
+            }));
+        }
+        // stop_agent: any agent can stop its children.
+        r.register(Box::new(stop_agent::StopAgentTool { my_pid: ma.pid }));
+    }
+
     r
 }

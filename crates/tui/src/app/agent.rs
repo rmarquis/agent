@@ -12,8 +12,14 @@ impl App {
         if self.session.first_user_message.is_none() {
             self.session.first_user_message = Some(text.clone());
         }
+        if !content.is_empty() {
+            self.history.push(Message::user(content.clone()));
+            self.sync_session_snapshot();
+            self.history.pop();
+        }
         self.maybe_generate_title(Some(&text));
         self.screen.set_throbber(render::Throbber::Working);
+        engine::registry::update_status(std::process::id(), engine::registry::AgentStatus::Working);
 
         let turn_id = self.next_turn_id;
         self.next_turn_id += 1;
@@ -41,12 +47,56 @@ impl App {
         }
     }
 
+    /// Start a turn triggered by agent messages already in history.
+    /// No user message block is shown — the agent messages are already
+    /// rendered as AgentMessage blocks.
+    pub(super) fn begin_agent_message_turn(&mut self) -> TurnState {
+        self.input_prediction = None;
+        self.screen.begin_turn();
+        self.sync_session_snapshot();
+        self.screen.set_throbber(render::Throbber::Working);
+        engine::registry::update_status(std::process::id(), engine::registry::AgentStatus::Working);
+
+        let turn_id = self.next_turn_id;
+        self.next_turn_id += 1;
+
+        // Send with empty content — the Agent messages are already in history.
+        self.engine.send(UiCommand::StartTurn {
+            turn_id,
+            content: Content::text(""),
+            mode: self.mode,
+            model: self.model.clone(),
+            reasoning_effort: self.reasoning_effort,
+            history: self.history.clone(),
+            api_base: Some(self.api_base.clone()),
+            api_key: Some(self.api_key()),
+            session_id: self.session.id.clone(),
+            session_dir: crate::session::dir_for(&self.session),
+            model_config_overrides: None,
+            permission_overrides: None,
+        });
+
+        TurnState {
+            turn_id,
+            pending: Vec::new(),
+            steered_count: 0,
+            _perf: crate::perf::begin("agent_turn"),
+        }
+    }
+
     pub(super) fn begin_custom_command_turn(
         &mut self,
         cmd: crate::custom_commands::CustomCommand,
     ) -> TurnState {
         let evaluated = crate::custom_commands::evaluate(&cmd.body);
         let display = format!("/{}", cmd.name);
+
+        if !evaluated.is_empty() {
+            self.history
+                .push(Message::user(Content::text(evaluated.clone())));
+            self.sync_session_snapshot();
+            self.history.pop();
+        }
 
         // Resolve model/provider overrides
         let (model, api_base, api_key) = {
@@ -176,9 +226,12 @@ impl App {
 
     pub(super) fn finish_turn(&mut self, cancelled: bool) {
         self.sleep_inhibit.release();
-        self.screen.flush_blocks();
         if cancelled {
             self.engine.send(UiCommand::Cancel);
+            self.kill_blocking_agents();
+        }
+        self.screen.flush_blocks();
+        if cancelled {
             self.screen.set_throbber(render::Throbber::Interrupted);
             // If a title/slug generation was in-flight, discard it so stale
             // TitleGenerated events don't update the session. But if a slug
@@ -201,6 +254,7 @@ impl App {
         } else {
             self.screen.set_throbber(render::Throbber::Done);
             // Fire async prediction for the user's next input.
+            // Skip predictions on subagent tabs — they're independent.
             self.input_prediction = None;
             if self.show_prediction {
                 // Collect last 3 user messages + last assistant message for
@@ -246,6 +300,7 @@ impl App {
         self.save_session();
         state::set_mode(self.mode);
         self.maybe_auto_compact();
+        engine::registry::update_status(std::process::id(), engine::registry::AgentStatus::Idle);
     }
 
     // ── Engine events ────────────────────────────────────────────────────
@@ -314,8 +369,10 @@ impl App {
                 args,
                 summary,
             } => {
-                self.screen
-                    .start_tool(call_id.clone(), tool_name.clone(), summary, args);
+                if tool_name != "spawn_agent" {
+                    self.screen
+                        .start_tool(call_id.clone(), tool_name.clone(), summary, args);
+                }
                 pending.push(PendingTool {
                     call_id,
                     name: tool_name,
@@ -328,21 +385,27 @@ impl App {
                 elapsed_ms,
             } => {
                 if let Some(idx) = pending.iter().position(|p| p.call_id == call_id) {
-                    pending.remove(idx);
-                    let status = if result.is_error {
-                        ToolStatus::Err
+                    let removed = pending.remove(idx);
+                    if removed.name == "spawn_agent" {
+                        self.screen.finish_active_agent();
                     } else {
-                        ToolStatus::Ok
-                    };
-                    let output = Some(ToolOutput {
-                        content: result.content,
-                        is_error: result.is_error,
-                    });
-                    let elapsed = elapsed_ms.map(Duration::from_millis);
-                    self.screen.finish_tool(&call_id, status, output, elapsed);
+                        let status = if result.is_error {
+                            ToolStatus::Err
+                        } else {
+                            ToolStatus::Ok
+                        };
+                        let output = Some(ToolOutput {
+                            content: result.content,
+                            is_error: result.is_error,
+                            metadata: result.metadata,
+                        });
+                        let elapsed = elapsed_ms.map(Duration::from_millis);
+                        self.screen.finish_tool(&call_id, status, output, elapsed);
+                    }
                 }
                 self.screen
                     .set_running_procs(self.engine.processes.running_count());
+                self.refresh_agent_counts();
                 SessionControl::Continue
             }
             EngineEvent::RequestPermission {
@@ -426,6 +489,40 @@ impl App {
                 SessionControl::Done
             }
             EngineEvent::Shutdown { .. } => SessionControl::Done,
+            EngineEvent::AgentExited {
+                agent_id,
+                exit_code,
+            } => {
+                self.handle_agent_exited(&agent_id, exit_code);
+                SessionControl::Continue
+            }
+            EngineEvent::AgentMessage {
+                from_id,
+                from_slug,
+                message,
+            } => {
+                // Suppress AgentMessage rendering for blocking agents — their
+                // result flows through the spawn_agent tool output instead.
+                let is_blocking = self
+                    .agents
+                    .iter()
+                    .any(|a| a.agent_id == from_id && a.blocking);
+                if !is_blocking {
+                    self.screen.push(Block::AgentMessage {
+                        from_id: from_id.clone(),
+                        from_slug: from_slug.clone(),
+                        content: message.clone(),
+                    });
+                }
+                // Forward to engine so it enters the conversation history
+                // (deferred until current tool batch completes).
+                self.engine.send(protocol::UiCommand::AgentMessage {
+                    from_id,
+                    from_slug,
+                    message,
+                });
+                SessionControl::Continue
+            }
         }
     }
 
@@ -470,6 +567,33 @@ impl App {
                 self.screen.set_throbber(render::Throbber::Done);
                 self.screen.notify_error(message);
             }
+            EngineEvent::AgentExited {
+                agent_id,
+                exit_code,
+            } => {
+                self.handle_agent_exited(&agent_id, exit_code);
+            }
+            EngineEvent::AgentMessage {
+                from_id,
+                from_slug,
+                message,
+            } => {
+                let is_blocking = self
+                    .agents
+                    .iter()
+                    .any(|a| a.agent_id == from_id && a.blocking);
+                if !is_blocking {
+                    self.screen.push(Block::AgentMessage {
+                        from_id: from_id.clone(),
+                        from_slug: from_slug.clone(),
+                        content: message.clone(),
+                    });
+                    // Queue as an Agent role message to trigger a turn without
+                    // rendering a duplicate User block.
+                    self.pending_agent_messages
+                        .push(protocol::Message::agent(&from_id, &from_slug, &message));
+                }
+            }
             _ => {}
         }
     }
@@ -480,9 +604,12 @@ impl App {
         }
         self.session.title = Some(title);
         self.session.slug = Some(slug.clone());
-        self.screen.set_task_label(slug);
+        self.screen.set_task_label(slug.clone());
         self.pending_title = false;
         self.save_session();
+
+        // Update registry with new task slug.
+        engine::registry::update_slug(std::process::id(), &slug);
     }
 
     fn handle_input_prediction(&mut self, text: String) {
@@ -494,6 +621,185 @@ impl App {
 
     pub(super) fn api_key(&self) -> String {
         std::env::var(&self.api_key_env).unwrap_or_default()
+    }
+
+    fn handle_agent_exited(&mut self, agent_id: &str, exit_code: Option<i32>) {
+        if let Some(c) = exit_code {
+            if c != 0 {
+                self.screen.push(Block::Hint {
+                    content: format!("{agent_id} exited with code {c}."),
+                });
+            }
+        }
+        self.agents.retain(|a| a.agent_id != agent_id);
+        self.refresh_agent_counts();
+        self.sync_agent_snapshots();
+    }
+
+    /// Kill all blocking (wait=true) agents and commit their blocks.
+    fn kill_blocking_agents(&mut self) {
+        let blocking_pids: Vec<u32> = self
+            .agents
+            .iter()
+            .filter(|a| a.blocking && a.status == super::AgentTrackStatus::Working)
+            .map(|a| a.pid)
+            .collect();
+        for pid in blocking_pids {
+            engine::registry::kill_agent(pid);
+        }
+        for agent in &mut self.agents {
+            if agent.blocking && agent.status == super::AgentTrackStatus::Working {
+                agent.status = super::AgentTrackStatus::Error;
+            }
+        }
+        self.screen.cancel_active_agent();
+    }
+
+    pub(super) fn refresh_agent_counts(&mut self) {
+        self.screen.set_agent_count(self.agents.len());
+    }
+
+    // ── Agent tracking ────────────────────────────────────────────────
+
+    /// Drain newly spawned child handles and create TrackedAgent entries.
+    pub(super) fn drain_spawned_children(&mut self) {
+        let children = self.engine.drain_spawned();
+        for child in children {
+            let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+
+            // Spawn a reader task that deserializes JSON events from stdout.
+            let stdout = child.stdout;
+            tokio::spawn(async move {
+                use tokio::io::{AsyncBufReadExt, BufReader};
+                let async_stdout =
+                    tokio::process::ChildStdout::from_std(stdout).expect("async stdout");
+                let reader = BufReader::new(async_stdout);
+                let mut lines = reader.lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    if let Ok(ev) = serde_json::from_str::<protocol::EngineEvent>(&line) {
+                        if event_tx.send(ev).is_err() {
+                            break;
+                        }
+                    }
+                }
+            });
+
+            if child.blocking {
+                // Blocking agents render as a live overlay (like active tools).
+                self.screen.start_active_agent(child.agent_id.clone());
+            } else {
+                // Non-blocking agents get a one-line static block.
+                self.screen.push(Block::Agent {
+                    agent_id: child.agent_id.clone(),
+                    slug: None,
+                    blocking: false,
+                    tool_calls: Vec::new(),
+                    status: render::AgentBlockStatus::Running,
+                    elapsed: None,
+                });
+            }
+
+            self.agents.push(super::TrackedAgent {
+                agent_id: child.agent_id,
+                pid: child.pid,
+                prompt: std::sync::Arc::new(child.prompt),
+                slug: None,
+                event_rx,
+                tool_calls: Vec::new(),
+                status: super::AgentTrackStatus::Working,
+                blocking: child.blocking,
+                started_at: Instant::now(),
+            });
+        }
+        self.refresh_agent_counts();
+    }
+
+    /// Drain stdout events for all tracked agents.
+    pub(super) fn drain_agent_events(&mut self) {
+        let mut changed = false;
+
+        for agent in &mut self.agents {
+            while let Ok(ev) = agent.event_rx.try_recv() {
+                changed = true;
+                match ev {
+                    EngineEvent::ToolStarted {
+                        call_id,
+                        tool_name,
+                        summary,
+                        ..
+                    } => {
+                        agent.status = super::AgentTrackStatus::Working;
+                        agent.tool_calls.push(super::AgentToolEntry {
+                            call_id,
+                            tool_name,
+                            summary,
+                            status: ToolStatus::Pending,
+                            elapsed: None,
+                        });
+                    }
+                    EngineEvent::ToolFinished {
+                        call_id,
+                        result,
+                        elapsed_ms,
+                    } => {
+                        if let Some(entry) =
+                            agent.tool_calls.iter_mut().find(|t| t.call_id == call_id)
+                        {
+                            entry.status = if result.is_error {
+                                ToolStatus::Err
+                            } else {
+                                ToolStatus::Ok
+                            };
+                            entry.elapsed = elapsed_ms.map(Duration::from_millis);
+                        }
+                    }
+                    EngineEvent::TitleGenerated { slug, .. } => {
+                        agent.slug = Some(slug);
+                    }
+                    EngineEvent::TurnComplete { .. } => {
+                        agent.status = super::AgentTrackStatus::Idle;
+                    }
+                    EngineEvent::TurnError { .. } => {
+                        agent.status = super::AgentTrackStatus::Error;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if !changed {
+            return;
+        }
+
+        // Update the active blocking agent overlay on screen.
+        for agent in &self.agents {
+            if agent.blocking {
+                let status = match agent.status {
+                    super::AgentTrackStatus::Working => render::AgentBlockStatus::Running,
+                    super::AgentTrackStatus::Idle => render::AgentBlockStatus::Done,
+                    super::AgentTrackStatus::Error => render::AgentBlockStatus::Error,
+                };
+                self.screen
+                    .update_active_agent(agent.slug.as_deref(), &agent.tool_calls, status);
+            }
+        }
+
+        self.refresh_agent_counts();
+        self.sync_agent_snapshots();
+    }
+
+    /// Update the shared snapshots so the /agents dialog sees live data.
+    fn sync_agent_snapshots(&self) {
+        let snaps: Vec<render::AgentSnapshot> = self
+            .agents
+            .iter()
+            .map(|a| render::AgentSnapshot {
+                agent_id: a.agent_id.clone(),
+                prompt: a.prompt.clone(),
+                tool_calls: a.tool_calls.clone(),
+            })
+            .collect();
+        *self.agent_snapshots.lock().unwrap() = snaps;
     }
 
     fn handle_process_completed(&mut self, id: String, exit_code: Option<i32>) {
@@ -597,6 +903,10 @@ impl App {
             } => {
                 self.sync_permissions(session_remaining, workspace_remaining);
                 self.screen.clear_dialog_area(anchor);
+            }
+            render::DialogResult::AgentsClosed => {
+                self.screen.clear_dialog_area(anchor);
+                self.refresh_agent_counts();
             }
             render::DialogResult::PsClosed | render::DialogResult::Dismissed => {
                 self.screen.clear_dialog_area(anchor);

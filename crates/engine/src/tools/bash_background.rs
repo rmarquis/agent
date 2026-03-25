@@ -16,10 +16,7 @@ pub fn format_read_result(output: String, running: bool, exit_code: Option<i32>)
     } else {
         format!("{output}\n[{status}]")
     };
-    ToolResult {
-        content,
-        is_error: false,
-    }
+    ToolResult::ok(content)
 }
 
 pub struct ReadProcessOutputTool {
@@ -61,10 +58,7 @@ impl Tool for ReadProcessOutputTool {
                     Ok((output, running, exit_code)) => {
                         format_read_result(output, running, exit_code)
                     }
-                    Err(e) => ToolResult {
-                        content: e,
-                        is_error: true,
-                    },
+                    Err(e) => ToolResult::err(e),
                 };
             }
 
@@ -105,10 +99,7 @@ impl Tool for ReadProcessOutputTool {
                         tokio::time::sleep(Duration::from_millis(100)).await;
                     }
                     Err(e) => {
-                        break ToolResult {
-                            content: e,
-                            is_error: true,
-                        };
+                        break ToolResult::err(e);
                     }
                 }
             }
@@ -147,18 +138,12 @@ impl Tool for StopProcessTool {
         Box::pin(async move {
             let id = str_arg(&args, "id");
             match self.registry.stop(&id) {
-                Ok(output) => ToolResult {
-                    content: if output.is_empty() {
-                        "process stopped (no output)".into()
-                    } else {
-                        format!("process stopped\n{output}")
-                    },
-                    is_error: false,
-                },
-                Err(e) => ToolResult {
-                    content: e,
-                    is_error: true,
-                },
+                Ok(output) => ToolResult::ok(if output.is_empty() {
+                    "process stopped (no output)".into()
+                } else {
+                    format!("process stopped\n{output}")
+                }),
+                Err(e) => ToolResult::err(e),
             }
         })
     }

@@ -86,10 +86,7 @@ impl Tool for WebFetchTool {
                 .extract_web_content(&raw.content, &prompt, ctx.model)
                 .await
             {
-                Ok(extracted) => ToolResult {
-                    content: extracted,
-                    is_error: false,
-                },
+                Ok(extracted) => ToolResult::ok(extracted),
                 Err(_) => raw,
             }
         })
@@ -112,28 +109,17 @@ impl WebFetchTool {
             .min(MAX_TIMEOUT);
 
         if !url_str.starts_with("http://") && !url_str.starts_with("https://") {
-            return ToolResult {
-                content: "URL must start with http:// or https://".into(),
-                is_error: true,
-            };
+            return ToolResult::err("URL must start with http:// or https://");
         }
 
         let parsed_url = match url::Url::parse(&url_str) {
             Ok(u) => u,
-            Err(e) => {
-                return ToolResult {
-                    content: format!("Invalid URL: {e}"),
-                    is_error: true,
-                }
-            }
+            Err(e) => return ToolResult::err(format!("Invalid URL: {e}")),
         };
 
         let cache_key = format!("fetch:{url_str}:{format}");
         if let Some(cached) = web_cache::get(&cache_key) {
-            return ToolResult {
-                content: cached,
-                is_error: false,
-            };
+            return ToolResult::ok(cached);
         }
 
         let fetch_url = url_str.clone();
@@ -181,26 +167,13 @@ impl WebFetchTool {
 
         let response = match fetch_result {
             Ok(Ok(r)) => r,
-            Ok(Err(e)) => {
-                return ToolResult {
-                    content: format!("Fetch failed: {e}"),
-                    is_error: true,
-                }
-            }
-            Err(_) => {
-                return ToolResult {
-                    content: "Fetch thread panicked".into(),
-                    is_error: true,
-                }
-            }
+            Ok(Err(e)) => return ToolResult::err(format!("Fetch failed: {e}")),
+            Err(_) => return ToolResult::err("Fetch thread panicked"),
         };
 
         let status = response.status();
         if !status.is_success() {
-            return ToolResult {
-                content: format!("HTTP {status}"),
-                is_error: true,
-            };
+            return ToolResult::err(format!("HTTP {status}"));
         }
 
         let content_type = response
@@ -213,48 +186,31 @@ impl WebFetchTool {
         if IMAGE_TYPES.iter().any(|t| content_type.contains(t)) {
             let bytes = match response.bytes() {
                 Ok(b) => b,
-                Err(e) => {
-                    return ToolResult {
-                        content: format!("Failed to read image: {e}"),
-                        is_error: true,
-                    }
-                }
+                Err(e) => return ToolResult::err(format!("Failed to read image: {e}")),
             };
             let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
             let mime = content_type.split(';').next().unwrap_or("image/png").trim();
-            return ToolResult {
-                content: format!("![image](data:{mime};base64,{b64})"),
-                is_error: false,
-            };
+            return ToolResult::ok(format!("![image](data:{mime};base64,{b64})"));
         }
 
         if let Some(len) = response.content_length() {
             if len as usize > MAX_RESPONSE_SIZE {
-                return ToolResult {
-                    content: format!("Response too large: {len} bytes (max {MAX_RESPONSE_SIZE})"),
-                    is_error: true,
-                };
+                return ToolResult::err(format!(
+                    "Response too large: {len} bytes (max {MAX_RESPONSE_SIZE})"
+                ));
             }
         }
 
         let body = match response.text() {
             Ok(t) => t,
-            Err(e) => {
-                return ToolResult {
-                    content: format!("Failed to read response: {e}"),
-                    is_error: true,
-                }
-            }
+            Err(e) => return ToolResult::err(format!("Failed to read response: {e}")),
         };
 
         if body.len() > MAX_RESPONSE_SIZE {
-            return ToolResult {
-                content: format!(
-                    "Response too large: {} bytes (max {MAX_RESPONSE_SIZE})",
-                    body.len()
-                ),
-                is_error: true,
-            };
+            return ToolResult::err(format!(
+                "Response too large: {} bytes (max {MAX_RESPONSE_SIZE})",
+                body.len()
+            ));
         }
 
         let is_html = content_type.contains("text/html") || content_type.contains("xhtml");
@@ -287,9 +243,6 @@ impl WebFetchTool {
         let output = truncate_output(&output, MAX_OUTPUT_LINES, MAX_OUTPUT_BYTES);
         web_cache::put(&cache_key, &output);
 
-        ToolResult {
-            content: output,
-            is_error: false,
-        }
+        ToolResult::ok(output)
     }
 }

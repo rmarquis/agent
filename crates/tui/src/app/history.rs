@@ -4,8 +4,27 @@ use crossterm::{event, event::Event, event::KeyEvent, terminal};
 use std::collections::HashMap;
 
 impl App {
+    fn reset_subagents_for_new_session(&mut self) {
+        let my_pid = std::process::id();
+        engine::registry::kill_descendants(my_pid);
+        self.agents.clear();
+        self.refresh_agent_counts();
+    }
+
     pub(super) fn set_history(&mut self, messages: Vec<Message>) {
         self.history = messages;
+        self.sync_session_snapshot();
+    }
+
+    pub(super) fn sync_session_snapshot(&mut self) {
+        self.session.messages = self.history.clone();
+        self.session.updated_at_ms = session::now_ms();
+        self.session.mode = Some(self.mode.as_str().to_string());
+        self.session.reasoning_effort = Some(self.reasoning_effort);
+        self.session.model = Some(self.model.clone());
+        if let Ok(mut guard) = self.shared_session.lock() {
+            *guard = Some(self.session.clone());
+        }
     }
 
     /// Record current token count so it can be restored on rewind.
@@ -43,15 +62,22 @@ impl App {
         self.input.clear();
         self.input.store.clear();
         self.engine.processes.clear();
+        self.reset_subagents_for_new_session();
         self.session = session::Session::new();
         self.pending_title = false;
         self.compact_epoch += 1;
+        if let Ok(mut guard) = self.shared_session.lock() {
+            *guard = None;
+        }
         // Drain stale engine events so old Messages snapshots don't
         // restore history into the freshly cleared session.
         while self.engine.try_recv().is_ok() {}
     }
 
     pub fn load_session(&mut self, loaded: session::Session) {
+        // Resume starts a fresh session view: stop/clear existing subagents tabs.
+        self.reset_subagents_for_new_session();
+
         // Restore per-session settings
         if let Some(ref mode_str) = loaded.mode {
             if let Some(mode) = Mode::parse(mode_str) {
@@ -91,6 +117,7 @@ impl App {
         self.pending_title = false;
         self.engine.processes.clear();
         self.compact_epoch += 1;
+        self.sync_session_snapshot();
         // Drain stale engine events so old snapshots don't overwrite
         // the loaded session's state.
         while self.engine.try_recv().is_ok() {}
@@ -183,6 +210,7 @@ impl App {
                         ToolOutput {
                             content: text,
                             is_error: msg.is_error,
+                            metadata: None,
                         },
                     );
                 }
@@ -200,12 +228,9 @@ impl App {
                         if let Some(summary) =
                             text.strip_prefix("Summary of prior conversation:\n\n")
                         {
-                            let trimmed = summary.trim();
-                            if !trimmed.is_empty() {
-                                self.screen.push(Block::Compacted {
-                                    summary: trimmed.to_string(),
-                                });
-                            }
+                            self.screen.push(Block::Compacted {
+                                summary: summary.to_string(),
+                            });
                         } else {
                             let image_labels = content.image_labels();
                             let display_text = if image_labels.is_empty() {
@@ -234,20 +259,53 @@ impl App {
                         }
                     }
                     if let Some(ref content) = msg.content {
-                        let text = content.text_content();
-                        let trimmed = text.trim();
-                        if !trimmed.is_empty() {
-                            self.screen.push(Block::Text {
-                                content: trimmed.to_string(),
-                            });
-                        }
+                        self.screen.push(Block::Text {
+                            content: content.text_content(),
+                        });
                     }
                     if let Some(ref calls) = msg.tool_calls {
                         for tc in calls {
                             let args: HashMap<String, serde_json::Value> =
                                 serde_json::from_str(&tc.function.arguments).unwrap_or_default();
-                            let summary = tool_arg_summary(&tc.function.name, &args);
                             let output = tool_outputs.get(&tc.id).cloned();
+
+                            if tc.function.name == "spawn_agent" {
+                                let meta = output.as_ref().and_then(|o| o.metadata.as_ref());
+                                let result_text =
+                                    output.as_ref().map(|o| o.content.as_str()).unwrap_or("");
+                                let agent_id = meta
+                                    .and_then(|m| m["agent_id"].as_str())
+                                    .or_else(|| {
+                                        result_text
+                                            .strip_prefix("agent ")
+                                            .and_then(|s| s.split_whitespace().next())
+                                    })
+                                    .unwrap_or("?")
+                                    .to_string();
+                                let is_blocking = meta
+                                    .and_then(|m| m["blocking"].as_bool())
+                                    .unwrap_or_else(|| result_text.contains("finished:"));
+                                let is_error = output.as_ref().is_some_and(|o| o.is_error);
+                                let block_status = if is_error {
+                                    render::AgentBlockStatus::Error
+                                } else {
+                                    render::AgentBlockStatus::Done
+                                };
+                                let elapsed = tool_elapsed
+                                    .get(&tc.id)
+                                    .map(|ms| Duration::from_millis(*ms));
+                                self.screen.push(Block::Agent {
+                                    agent_id,
+                                    slug: None,
+                                    blocking: is_blocking,
+                                    tool_calls: Vec::new(),
+                                    status: block_status,
+                                    elapsed,
+                                });
+                                continue;
+                            }
+
+                            let summary = tool_arg_summary(&tc.function.name, &args);
                             let status = if let Some(ref out) = output {
                                 if out.content.contains("denied this tool call")
                                     || out.content.contains("blocked this tool call")
@@ -278,6 +336,15 @@ impl App {
                 }
                 Role::Tool => {}
                 Role::System => {}
+                Role::Agent => {
+                    if let Some(ref content) = msg.content {
+                        self.screen.push(Block::AgentMessage {
+                            from_id: msg.agent_from_id.clone().unwrap_or_default(),
+                            from_slug: msg.agent_from_slug.clone().unwrap_or_default(),
+                            content: content.text_content(),
+                        });
+                    }
+                }
             }
         }
 
@@ -291,17 +358,10 @@ impl App {
         if self.history.is_empty() {
             return;
         }
-        self.session.messages = self.history.clone();
         self.session.token_snapshots = self.token_snapshots.clone();
         self.session.turn_metas = self.turn_metas.clone();
-        self.session.updated_at_ms = session::now_ms();
-        self.session.mode = Some(self.mode.as_str().to_string());
-        self.session.reasoning_effort = Some(self.reasoning_effort);
-        self.session.model = Some(self.model.clone());
+        self.sync_session_snapshot();
         session::save(&self.session, &self.input.store);
-        if let Ok(mut guard) = self.shared_session.lock() {
-            *guard = Some(self.session.clone());
-        }
     }
 
     pub(super) fn maybe_generate_title(&mut self, current_message: Option<&str>) {

@@ -56,10 +56,43 @@ pub async fn engine_task(
                             &config.permissions
                         };
                         let system_prompt = config.system_prompt_override.clone().unwrap_or_else(|| {
-                            crate::build_system_prompt(
+                            let agent_config = if let Some(ref ma) = config.multi_agent {
+                                let scope = config.cwd.to_string_lossy();
+                                let my_pid = std::process::id();
+                                let my_entry = crate::registry::read_entry(my_pid).ok();
+                                let agent_id = my_entry
+                                    .as_ref()
+                                    .map(|e| e.agent_id.clone())
+                                    .unwrap_or_default();
+                                let parent_id = ma.parent_pid.and_then(|ppid| {
+                                    crate::registry::read_entry(ppid)
+                                        .ok()
+                                        .map(|e| e.agent_id)
+                                });
+                                let siblings = if ma.depth > 0 {
+                                    let entries = crate::registry::discover(&scope);
+                                    entries
+                                        .iter()
+                                        .filter(|e| e.pid != my_pid && e.parent_pid == ma.parent_pid)
+                                        .map(|e| e.agent_id.clone())
+                                        .collect()
+                                } else {
+                                    vec![]
+                                };
+                                Some(crate::AgentPromptConfig {
+                                    agent_id,
+                                    depth: ma.depth,
+                                    parent_id,
+                                    siblings,
+                                })
+                            } else {
+                                None
+                            };
+                            crate::build_system_prompt_full(
                                 mode,
                                 &config.cwd,
                                 config.instructions.as_deref(),
+                                agent_config.as_ref(),
                             )
                         });
                         let mut turn = Turn {
@@ -354,6 +387,25 @@ impl<'a> Turn<'a> {
         let _ = self.event_tx.send(event);
     }
 
+    fn emit_messages_snapshot(&self) {
+        // Only subagents consume Messages snapshots. Interactive mode ignores
+        // them, so skip the expensive clone of the entire conversation history.
+        if self.config.interactive {
+            return;
+        }
+        let mut messages = self.messages.clone();
+        if messages
+            .first()
+            .is_some_and(|m| matches!(m.role, Role::System))
+        {
+            messages.remove(0);
+        }
+        self.emit(EngineEvent::Messages {
+            turn_id: self.turn_id,
+            messages,
+        });
+    }
+
     fn emit_turn_complete(&mut self, interrupted: bool) {
         let meta = self.build_meta(interrupted);
         self.messages.remove(0);
@@ -438,6 +490,67 @@ impl<'a> Turn<'a> {
         }
     }
 
+    /// Apply a turn-local command immediately to in-memory state.
+    /// Returns true if the command was consumed here.
+    fn handle_turn_cmd(&mut self, cmd: UiCommand) -> bool {
+        match cmd {
+            UiCommand::Steer { text } => {
+                self.emit(EngineEvent::Steered {
+                    text: text.clone(),
+                    count: 1,
+                });
+                self.messages.push(Message::user(Content::text(text)));
+                self.emit_messages_snapshot();
+                true
+            }
+            UiCommand::Unsteer { count } => {
+                for _ in 0..count {
+                    if let Some(pos) = self.messages.iter().rposition(|m| m.role == Role::User) {
+                        self.messages.remove(pos);
+                    }
+                }
+                self.emit_messages_snapshot();
+                true
+            }
+            UiCommand::SetMode { mode } => {
+                self.mode = mode;
+                true
+            }
+            UiCommand::SetReasoningEffort { effort } => {
+                self.reasoning_effort = effort;
+                true
+            }
+            UiCommand::SetModel {
+                model,
+                api_base,
+                api_key,
+                provider_type,
+            } => {
+                self.apply_model_change(model, api_base, api_key, provider_type);
+                true
+            }
+            UiCommand::Cancel => {
+                self.cancel.cancel();
+                true
+            }
+            UiCommand::AgentMessage {
+                from_id,
+                from_slug,
+                message,
+            } => {
+                // Don't re-emit EngineEvent::AgentMessage here — the TUI
+                // already rendered the block when the socket bridge first
+                // delivered the event. Just inject into conversation history
+                // so the LLM sees it on the next API call.
+                self.messages
+                    .push(Message::agent(&from_id, &from_slug, &message));
+                self.emit_messages_snapshot();
+                true
+            }
+            other => self.handle_background_cmd(other),
+        }
+    }
+
     /// Main agentic loop for a single turn.
     async fn run(&mut self, content: Content, history: Vec<Message>) {
         self.messages = Vec::with_capacity(history.len() + 2);
@@ -447,6 +560,7 @@ impl<'a> Turn<'a> {
         if !content.is_empty() {
             self.messages.push(Message::user(content));
         }
+        self.emit_messages_snapshot();
 
         let mut first = true;
         let mut empty_retries: u8 = 0;
@@ -473,7 +587,7 @@ impl<'a> Turn<'a> {
             }
 
             // Call LLM with cancel monitoring
-            let resp = match self.call_llm(&tool_defs).await {
+            let (resp, had_injected) = match self.call_llm(&tool_defs).await {
                 Ok(r) => r,
                 Err(ProviderError::Cancelled) => {
                     self.emit_turn_complete(true);
@@ -520,7 +634,19 @@ impl<'a> Turn<'a> {
                 });
             }
 
-            if let Some(ref reasoning) = resp.reasoning_content {
+            let content = resp.content.map(Content::text);
+            let tool_calls = resp.tool_calls;
+            let reasoning = resp.reasoning_content;
+
+            // If a message was injected during the LLM call and the LLM
+            // produced only text (no tool calls), discard this response —
+            // the LLM never saw the injected message. Loop immediately so
+            // it gets a chance to respond to the new context.
+            if had_injected && tool_calls.is_empty() {
+                continue;
+            }
+
+            if let Some(ref reasoning) = reasoning {
                 let trimmed = reasoning.trim();
                 if !trimmed.is_empty() {
                     self.emit(EngineEvent::Thinking {
@@ -529,8 +655,8 @@ impl<'a> Turn<'a> {
                 }
             }
 
-            if let Some(ref content) = resp.content {
-                let trimmed = content.trim();
+            if let Some(ref content) = content {
+                let trimmed = content.as_text().trim();
                 if !trimmed.is_empty() {
                     self.emit(EngineEvent::Text {
                         content: trimmed.to_string(),
@@ -538,11 +664,7 @@ impl<'a> Turn<'a> {
                 }
             }
 
-            let content = resp.content.map(Content::text);
-            let tool_calls = resp.tool_calls;
-            let reasoning = resp.reasoning_content;
-
-            // No tool calls — turn is done
+            // No tool calls — turn is done.
             if tool_calls.is_empty() {
                 let is_empty = content.is_none()
                     && reasoning.is_none()
@@ -564,6 +686,7 @@ impl<'a> Turn<'a> {
 
                 self.messages
                     .push(Message::assistant(content, reasoning, None));
+                self.emit_messages_snapshot();
                 self.emit_turn_complete(false);
                 return;
             }
@@ -575,6 +698,7 @@ impl<'a> Turn<'a> {
                 reasoning,
                 Some(tool_calls.clone()),
             ));
+            self.emit_messages_snapshot();
 
             // Phase 1: Permission checks (sequential — needs &mut self for
             // cmd_rx access) and resolve tool references.
@@ -670,18 +794,41 @@ impl<'a> Turn<'a> {
                 .map(|(a, ctx)| a.tool.execute(a.args.clone(), ctx))
                 .collect();
 
-            let results = tokio::select! {
-                results = futures_util::future::join_all(futures) => results,
-                _ = self.cancel.cancelled() => {
-                    // Cancellation requested — emit ToolFinished for any
-                    // in-flight tools so the TUI can clean up.
+            // Run tools while draining cmd_rx so that Cancel (and other
+            // commands like AgentMessage) are handled without waiting for
+            // all tools to finish — important for long-running tools like
+            // blocking spawn_agent.
+            let (results, deferred_tool_cmds) = {
+                let tool_future = futures_util::future::join_all(futures);
+                tokio::pin!(tool_future);
+                let cancel = &self.cancel;
+                let cmd_rx = &mut self.cmd_rx;
+                let mut deferred: Vec<UiCommand> = Vec::new();
+                let r = loop {
+                    tokio::select! {
+                        results = &mut tool_future => break Some(results),
+                        _ = cancel.cancelled() => break None,
+                        Some(cmd) = cmd_rx.recv() => match cmd {
+                            UiCommand::Cancel => cancel.cancel(),
+                            UiCommand::AgentMessage { .. }
+                            | UiCommand::Steer { .. }
+                            | UiCommand::Unsteer { .. } => deferred.push(cmd),
+                            _ => {}
+                        },
+                    }
+                };
+                (r, deferred)
+            };
+
+            for cmd in deferred_tool_cmds {
+                self.handle_turn_cmd(cmd);
+            }
+
+            let results = match results {
+                Some(r) => r,
+                None => {
                     for a in &approved {
-                        self.push_tool_result(
-                            &a.tc.id,
-                            "cancelled",
-                            true,
-                            Some(a.start),
-                        );
+                        self.push_tool_result(&a.tc.id, "cancelled", true, Some(a.start));
                     }
                     continue;
                 }
@@ -700,7 +847,15 @@ impl<'a> Turn<'a> {
                 .zip(results)
                 .chain(sequential.iter().zip(seq_results));
 
-            for (entry, ToolResult { content, is_error }) in all_results {
+            for (
+                entry,
+                ToolResult {
+                    content,
+                    is_error,
+                    metadata,
+                },
+            ) in all_results
+            {
                 log::entry(
                     log::Level::Debug,
                     "tool_result",
@@ -721,9 +876,14 @@ impl<'a> Turn<'a> {
                 }
                 self.messages
                     .push(Message::tool(entry.tc.id.clone(), tool_content, is_error));
+                self.emit_messages_snapshot();
                 self.emit(EngineEvent::ToolFinished {
                     call_id: entry.tc.id.clone(),
-                    result: ToolOutcome { content, is_error },
+                    result: ToolOutcome {
+                        content,
+                        is_error,
+                        metadata,
+                    },
                     elapsed_ms: Some(elapsed_ms),
                 });
             }
@@ -732,57 +892,24 @@ impl<'a> Turn<'a> {
 
     /// Drain pending commands (steering, mode changes, cancel).
     fn drain_commands(&mut self) {
-        loop {
-            match self.cmd_rx.try_recv() {
-                Ok(UiCommand::Steer { text }) => {
-                    self.emit(EngineEvent::Steered {
-                        text: text.clone(),
-                        count: 1,
-                    });
-                    self.messages.push(Message::user(Content::text(text)));
-                }
-                Ok(UiCommand::Unsteer { count }) => {
-                    // Remove the last `count` steered user messages.
-                    for _ in 0..count {
-                        if let Some(pos) = self.messages.iter().rposition(|m| m.role == Role::User)
-                        {
-                            self.messages.remove(pos);
-                        }
-                    }
-                }
-                Ok(UiCommand::SetMode { mode }) => {
-                    self.mode = mode;
-                }
-                Ok(UiCommand::SetReasoningEffort { effort }) => {
-                    self.reasoning_effort = effort;
-                }
-                Ok(UiCommand::SetModel {
-                    model,
-                    api_base,
-                    api_key,
-                    provider_type,
-                }) => {
-                    self.apply_model_change(model, api_base, api_key, provider_type);
-                }
-                Ok(UiCommand::Cancel) => {
-                    self.cancel.cancel();
-                }
-                Ok(other) => {
-                    self.handle_background_cmd(other);
-                }
-                Err(_) => break,
-            }
+        while let Ok(cmd) = self.cmd_rx.try_recv() {
+            self.handle_turn_cmd(cmd);
         }
     }
 
     /// Call the LLM, monitoring cmd_rx for Cancel during the request.
+    /// Returns (response, had_injected_messages). The bool is true when
+    /// Steer or AgentMessage commands arrived during the LLM call and were
+    /// injected into conversation history — the caller should continue the
+    /// loop instead of ending the turn.
     async fn call_llm(
         &mut self,
         tool_defs: &[ToolDefinition],
-    ) -> Result<crate::provider::LLMResponse, ProviderError> {
+    ) -> Result<(crate::provider::LLMResponse, bool), ProviderError> {
         // The chat future borrows self.provider and self.model, so model
         // changes received mid-request are deferred until the future resolves.
         let mut pending_model: Option<(String, String, String, String)> = None;
+        let mut deferred_turn_cmds: Vec<UiCommand> = Vec::new();
 
         let result = {
             let on_retry = |delay: std::time::Duration, attempt: u32| {
@@ -818,7 +945,12 @@ impl<'a> Turn<'a> {
                         UiCommand::SetModel { model, api_base, api_key, provider_type } => {
                             pending_model = Some((model, api_base, api_key, provider_type));
                         }
-                        other => { self.handle_background_cmd(other); }
+                        UiCommand::Steer { .. }
+                        | UiCommand::Unsteer { .. }
+                        | UiCommand::AgentMessage { .. } => deferred_turn_cmds.push(cmd),
+                        other => {
+                            self.handle_background_cmd(other);
+                        }
                     },
                 }
             }
@@ -827,7 +959,13 @@ impl<'a> Turn<'a> {
         if let Some((model, api_base, api_key, provider_type)) = pending_model {
             self.apply_model_change(model, api_base, api_key, provider_type);
         }
-        result
+        let had_injected = deferred_turn_cmds
+            .iter()
+            .any(|c| matches!(c, UiCommand::Steer { .. } | UiCommand::AgentMessage { .. }));
+        for cmd in deferred_turn_cmds {
+            self.handle_turn_cmd(cmd);
+        }
+        result.map(|r| (r, had_injected))
     }
 
     /// Check permission and handle the Ask flow.
@@ -907,10 +1045,7 @@ impl<'a> Turn<'a> {
             args: args.clone(),
         });
         let answer = self.wait_for_answer(request_id).await;
-        ToolResult {
-            content: answer.unwrap_or_else(|| "no response".into()),
-            is_error: false,
-        }
+        ToolResult::ok(answer.unwrap_or_else(|| "no response".to_string()))
     }
 
     /// Wait for a PermissionDecision matching the given request_id.
@@ -986,6 +1121,7 @@ impl<'a> Turn<'a> {
             result: ToolOutcome {
                 content: content.to_string(),
                 is_error,
+                metadata: None,
             },
             elapsed_ms: started_at.map(|t| t.elapsed().as_millis() as u64),
         });

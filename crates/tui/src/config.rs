@@ -60,6 +60,7 @@ pub struct SettingsConfig {
     pub input_prediction: Option<bool>,
     pub task_slug: Option<bool>,
     pub restrict_to_workspace: Option<bool>,
+    pub multi_agent: Option<bool>,
 }
 
 impl SettingsConfig {
@@ -77,6 +78,7 @@ impl SettingsConfig {
             "input_prediction" => self.input_prediction = b()?,
             "task_slug" => self.task_slug = b()?,
             "restrict_to_workspace" => self.restrict_to_workspace = b()?,
+            "multi_agent" => self.multi_agent = b()?,
             _ => return Err(format!("unknown setting '{key}'")),
         }
         Ok(())

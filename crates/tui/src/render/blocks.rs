@@ -55,6 +55,10 @@ pub(super) fn gap_between(above: &Element, below: &Element) -> u16 {
         (_, Element::Block(Block::Hint { .. })) => 1,
         (_, Element::Block(Block::Compacted { .. })) => 1,
         (Element::Block(Block::Compacted { .. }), _) => 1,
+        (_, Element::Block(Block::AgentMessage { .. })) => 1,
+        (Element::Block(Block::AgentMessage { .. }), _) => 1,
+        (_, Element::Block(Block::Agent { .. })) => 1,
+        (Element::Block(Block::Agent { .. }), _) => 1,
         (Element::ActiveTool, Element::ActiveTool) => 1,
         (_, Element::ActiveExec) => 1,
         (Element::ActiveExec, _) => 1,
@@ -208,11 +212,147 @@ pub(super) fn render_block(out: &mut RenderOut, block: &Block, width: usize) -> 
             crlf(out);
             let mut rows = 1u16;
             if !output.is_empty() {
-                rows += render_bash_output(out, output, false, width);
+                rows += render_wrapped_output(out, output, false, width);
             }
             rows
         }
+        Block::AgentMessage {
+            from_id,
+            from_slug: _,
+            content,
+        } => {
+            let header = format!(" ➜ {from_id}");
+            let _ = out.queue(SetForegroundColor(crate::theme::AGENT));
+            let _ = out.queue(SetAttribute(Attribute::Bold));
+            let _ = out.queue(Print(&header));
+            let _ = out.queue(SetAttribute(Attribute::Reset));
+            let _ = out.queue(ResetColor);
+            crlf(out);
+            let bctx = super::BoxContext {
+                left: " \u{2502} ",
+                right: "",
+                color: crate::theme::AGENT,
+                inner_w: width.saturating_sub(4),
+            };
+            1 + render_markdown_inner(out, content, width, bctx.left, true, Some(&bctx))
+        }
+        Block::Agent {
+            agent_id,
+            slug,
+            blocking,
+            tool_calls,
+            status,
+            elapsed,
+        } => render_agent_block(
+            out,
+            agent_id,
+            slug.as_deref(),
+            *blocking,
+            tool_calls,
+            *status,
+            *elapsed,
+            width,
+        ),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_agent_block(
+    out: &mut RenderOut,
+    agent_id: &str,
+    slug: Option<&str>,
+    blocking: bool,
+    tool_calls: &[crate::app::AgentToolEntry],
+    status: super::AgentBlockStatus,
+    elapsed: Option<Duration>,
+    width: usize,
+) -> u16 {
+    use super::AgentBlockStatus;
+    let mut rows = 0u16;
+
+    // Header: " ➜ agent_id · slug [✓/✗] [elapsed]"
+    let _ = out.queue(SetForegroundColor(crate::theme::AGENT));
+    let _ = out.queue(SetAttribute(Attribute::Bold));
+    let _ = out.queue(Print(format!(" + {agent_id}")));
+    let _ = out.queue(SetAttribute(Attribute::NormalIntensity));
+
+    if !blocking {
+        let _ = out.queue(SetForegroundColor(crate::theme::MUTED));
+        let _ = out.queue(Print(" started"));
+        let _ = out.queue(SetAttribute(Attribute::Reset));
+        let _ = out.queue(ResetColor);
+        crlf(out);
+        return rows + 1;
+    }
+
+    if let Some(slug) = slug {
+        let _ = out.queue(SetAttribute(Attribute::Dim));
+        let _ = out.queue(Print(format!(" \u{00b7} {slug}")));
+        let _ = out.queue(SetAttribute(Attribute::NormalIntensity));
+    }
+
+    match status {
+        AgentBlockStatus::Done => {
+            let _ = out.queue(SetForegroundColor(crate::theme::SUCCESS));
+            let _ = out.queue(Print(" \u{2713}")); // ✓
+        }
+        AgentBlockStatus::Error => {
+            let _ = out.queue(SetForegroundColor(crate::theme::ERROR));
+            let _ = out.queue(Print(" \u{2717}")); // ✗
+        }
+        AgentBlockStatus::Running => {}
+    }
+
+    if let Some(d) = elapsed {
+        if d.as_secs_f64() >= 0.1 {
+            let _ = out.queue(SetAttribute(Attribute::Dim));
+            let _ = out.queue(SetForegroundColor(crate::theme::MUTED));
+            let _ = out.queue(Print(format!("  {}", format_duration(d.as_secs()))));
+            let _ = out.queue(SetAttribute(Attribute::NormalIntensity));
+        }
+    }
+
+    let _ = out.queue(SetAttribute(Attribute::Reset));
+    let _ = out.queue(ResetColor);
+    crlf(out);
+    rows += 1;
+
+    // Blocking: show last 3 tool calls with left border.
+    let visible = tool_calls.iter().rev().take(3).collect::<Vec<_>>();
+    for entry in visible.iter().rev() {
+        let _ = out.queue(SetForegroundColor(crate::theme::AGENT));
+        let _ = out.queue(Print(" \u{2502} ")); // │
+        let _ = out.queue(ResetColor);
+
+        let _ = out.queue(SetAttribute(Attribute::Dim));
+        let _ = out.queue(Print(&entry.tool_name));
+        let _ = out.queue(SetAttribute(Attribute::NormalIntensity));
+
+        let max_summary = width.saturating_sub(6 + entry.tool_name.len());
+        let summary = truncate_str(&entry.summary, max_summary);
+        let _ = out.queue(Print(format!(" {summary}")));
+
+        if let Some(d) = entry.elapsed {
+            if d.as_secs_f64() >= 0.1 {
+                let _ = out.queue(SetAttribute(Attribute::Dim));
+                let _ = out.queue(Print(format!("  {}", format_duration(d.as_secs()))));
+                let _ = out.queue(SetAttribute(Attribute::NormalIntensity));
+            }
+        }
+
+        crlf(out);
+        rows += 1;
+    }
+
+    // Bottom border
+    let border_w = width.saturating_sub(2);
+    let _ = out.queue(SetForegroundColor(crate::theme::AGENT));
+    let _ = out.queue(Print(format!(" \u{2570}{}", "\u{2500}".repeat(border_w))));
+    let _ = out.queue(ResetColor);
+    crlf(out);
+    rows += 1;
+
+    rows
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -235,7 +375,7 @@ pub(super) fn render_tool(
     };
     let time = if matches!(
         name,
-        "bash" | "web_fetch" | "read_process_output" | "stop_process"
+        "bash" | "web_fetch" | "read_process_output" | "stop_process" | "peek_agent"
     ) && status != ToolStatus::Confirm
     {
         elapsed
@@ -375,6 +515,10 @@ fn print_tool_line(
     let _ = out.queue(Print(" "));
     if name == "bash" {
         print_highlighted_bash_line(out, &truncated);
+    } else if matches!(name, "message_agent" | "stop_agent" | "peek_agent") {
+        // Agent tool summaries start with agent name(s), followed by
+        // optional text. Color only the leading agent name tokens.
+        print_agent_summary(out, &truncated);
     } else {
         let _ = out.queue(Print(&truncated));
     }
@@ -385,6 +529,50 @@ fn print_tool_line(
         print_dim(out, &timeout_str);
     }
     crlf(out);
+}
+
+/// Print an agent tool summary: color leading agent name tokens, print the
+/// rest as plain text. Agent names are single words (no spaces) optionally
+/// separated by ", ". The first token that contains a space or follows a
+/// non-comma separator marks the start of the plain-text portion.
+fn print_agent_summary(out: &mut RenderOut, summary: &str) {
+    // Find where agent names end: consume "word(, word)*" prefix.
+    let mut end = 0;
+    let mut rest = summary;
+    loop {
+        // Skip leading whitespace.
+        let trimmed = rest.trim_start();
+        let skipped = rest.len() - trimmed.len();
+        // Find end of next word.
+        let word_end = trimmed.find([' ', ',']).unwrap_or(trimmed.len());
+        if word_end == 0 {
+            break;
+        }
+        end += skipped + word_end;
+        rest = &trimmed[word_end..];
+        // If followed by ", " consume the separator and continue.
+        if rest.starts_with(", ") {
+            end += 2;
+            rest = &rest[2..];
+        } else {
+            break;
+        }
+    }
+    if end > 0 {
+        let names = &summary[..end];
+        for (i, name) in names.split(", ").enumerate() {
+            if i > 0 {
+                let _ = out.queue(Print(", "));
+            }
+            let _ = out.queue(SetForegroundColor(theme::AGENT));
+            let _ = out.queue(Print(name.trim()));
+            let _ = out.queue(ResetColor);
+        }
+    }
+    let tail = &summary[end..];
+    if !tail.is_empty() {
+        let _ = out.queue(Print(tail));
+    }
 }
 
 fn print_tool_output(
@@ -430,7 +618,17 @@ fn print_tool_output(
         "ask_user_question" if !is_error => render_question_output(out, content, width),
         "exit_plan_mode" if !is_error => render_plan_output(out, args, width),
         "bash" | "read_process_output" | "stop_process" => {
-            render_bash_output(out, content, is_error, width)
+            render_wrapped_output(out, content, is_error, width)
+        }
+        "peek_agent" if !is_error => render_wrapped_output(out, content, false, width),
+        "list_agents" | "message_agent" | "stop_agent" | "spawn_agent" if !is_error => {
+            let mut rows = 0u16;
+            for line in content.lines() {
+                print_dim(out, &format!("   {line}"));
+                crlf(out);
+                rows += 1;
+            }
+            rows.max(1)
         }
         _ => render_default_output(out, content, is_error, width),
     }
@@ -731,7 +929,7 @@ fn render_plan_output(
     rows
 }
 
-fn render_bash_output(out: &mut RenderOut, content: &str, is_error: bool, width: usize) -> u16 {
+fn render_wrapped_output(out: &mut RenderOut, content: &str, is_error: bool, width: usize) -> u16 {
     const MAX_VISUAL_ROWS: usize = 20;
     let max_cols = width.saturating_sub(4); // "   " prefix + 1 margin
 
@@ -892,7 +1090,7 @@ pub(super) fn render_active_exec(out: &mut RenderOut, exec: &ActiveExec, width: 
     let mut rows = 1u16;
 
     if !exec.output.is_empty() {
-        rows += render_bash_output(out, &exec.output, false, width);
+        rows += render_wrapped_output(out, &exec.output, false, width);
     }
     rows
 }

@@ -63,6 +63,7 @@ pub const YOLO: Color = Color::AnsiValue(204); // rose for yolo mode
 pub const EXEC: Color = Color::AnsiValue(197); // red-pink for exec mode
 pub const SUCCESS: Color = Color::AnsiValue(114); // soft green for answered/success
 pub const ERROR: Color = Color::Red;
+pub const AGENT: Color = Color::AnsiValue(75); // blue for agent messages and UI
 
 /// Preset themes: (name, detail, ansi value)
 pub const PRESETS: &[(&str, &str, u8)] = &[

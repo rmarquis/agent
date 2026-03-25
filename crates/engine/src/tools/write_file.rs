@@ -57,22 +57,23 @@ impl WriteFileTool {
         let path = str_arg(args, "file_path");
         let content = str_arg(args, "content");
 
-        if Path::new(&path).exists() {
+        // Acquire cross-process advisory lock if the file exists.
+        let _flock = if Path::new(&path).exists() {
             let has_hash = self.hashes.lock().is_ok_and(|map| map.contains_key(&path));
             if !has_hash {
-                return ToolResult {
-                    content: "File already exists. Use edit_file to modify existing files, or read_file then write_file to replace.".into(),
-                    is_error: true,
-                };
+                return ToolResult::err("File already exists. Use edit_file to modify existing files, or read_file then write_file to replace.");
             }
-        }
+            match super::try_flock(&path) {
+                Ok(guard) => Some(guard),
+                Err(e) => return ToolResult::err(e),
+            }
+        } else {
+            None
+        };
 
         if let Some(parent) = Path::new(&path).parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
-                return ToolResult {
-                    content: e.to_string(),
-                    is_error: true,
-                };
+                return ToolResult::err(e.to_string());
             }
         }
 
@@ -81,15 +82,13 @@ impl WriteFileTool {
                 if let Ok(mut map) = self.hashes.lock() {
                     map.insert(path.clone(), hash_content(&content));
                 }
-                ToolResult {
-                    content: format!("wrote {} bytes to {}", content.len(), display_path(&path)),
-                    is_error: false,
-                }
+                ToolResult::ok(format!(
+                    "wrote {} bytes to {}",
+                    content.len(),
+                    display_path(&path)
+                ))
             }
-            Err(e) => ToolResult {
-                content: e.to_string(),
-                is_error: true,
-            },
+            Err(e) => ToolResult::err(e.to_string()),
         }
     }
 }

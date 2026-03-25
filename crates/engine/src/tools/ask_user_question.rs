@@ -77,11 +77,6 @@ impl Tool for AskUserQuestionTool {
     ) -> ToolFuture<'a> {
         // The actual interaction is handled by the Turn loop in agent.rs.
         // This is a placeholder — the real result is injected by the engine.
-        Box::pin(async move {
-            ToolResult {
-                content: "waiting for user response".into(),
-                is_error: false,
-            }
-        })
+        Box::pin(async move { ToolResult::ok("waiting for user response") })
     }
 }

@@ -268,7 +268,7 @@ impl App {
                     // Cancel in-flight compaction instead of opening rewind.
                     if self.screen.working_throbber() == Some(render::Throbber::Compacting) {
                         self.compact_epoch += 1;
-                        self.screen.set_throbber(render::Throbber::Done);
+                        self.screen.set_throbber(render::Throbber::Interrupted);
                         self.screen.notify("compaction cancelled".into());
                         if restore_mode == Some(vim::ViMode::Insert) {
                             self.input.set_vim_mode(vim::ViMode::Insert);
@@ -749,13 +749,14 @@ impl App {
     /// `draw_frame` cleared the area underneath it).
     pub(super) fn tick(&mut self, agent_running: bool, has_dialog: bool) -> bool {
         let w = render::term_width();
+        let screen = &mut self.screen;
+
         if has_dialog {
-            // Render blocks + active tool but skip the prompt — the dialog
-            // covers the bottom and must stay at the highest z-index.
-            return self.screen.draw_frame(w, None);
+            return screen.draw_frame(w, None);
         }
+
         if agent_running {
-            self.screen.draw_frame(
+            screen.draw_frame(
                 w,
                 Some(FramePrompt {
                     state: &self.input,
@@ -765,7 +766,7 @@ impl App {
                 }),
             );
         } else {
-            self.screen.draw_frame(
+            screen.draw_frame(
                 w,
                 Some(FramePrompt {
                     state: &self.input,

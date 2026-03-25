@@ -49,6 +49,8 @@ agent --model gpt-5.4 --api-base https://api.openai.com/v1 --api-key-env OPENAI_
   usage
 - **Reasoning effort** — configurable thinking depth (off/low/medium/high/max)
 - **File references** — attach file contents with `@path` syntax
+- **Multi-agent** — spawn parallel subagents, inter-agent communication via
+  message/query, peer discovery (opt-in)
 - **Background processes** — async bash execution with completion tracking
 - **Custom commands** — user-defined slash commands via markdown files
 - **Custom instructions** — project-level `AGENTS.md` files
@@ -129,6 +131,7 @@ settings:
   input_prediction: true # ghost text next-message prediction (default: true)
   task_slug: true # short task label on the status bar (default: true)
   restrict_to_workspace: true # downgrade Allow→Ask for out-of-workspace paths (default: true)
+  multi_agent: false # enable multi-agent mode (default: false)
 
 # Visual appearance
 theme:
@@ -189,6 +192,13 @@ permissions:
 | `exit_plan_mode`      | Deny   | Ask   | Deny  | Deny  |
 | `read_process_output` | Ask    | Ask   | Ask   | Allow |
 | `stop_process`        | Ask    | Ask   | Ask   | Allow |
+| `spawn_agent`*        | Allow  | Allow | Allow | Allow |
+| `list_agents`*        | Allow  | Allow | Allow | Allow |
+| `message_agent`*      | Allow  | Allow | Allow | Allow |
+| `peek_agent`*         | Allow  | Allow | Allow | Allow |
+| `stop_agent`*         | Allow  | Allow | Allow | Allow |
+
+*Multi-agent tools are only registered when `--multi-agent` is enabled.
 
 **Default bash patterns** (when `permissions.{mode}.bash` is omitted):
 
@@ -252,6 +262,8 @@ agent [MESSAGE]                Initial message to send (auto-submits on startup)
 --no-system-prompt             Disable system prompt and AGENTS.md instructions
 --set <KEY=VALUE>              Override a config setting (can be repeated)
 --headless                     Run without TUI (requires a message argument)
+--multi-agent                  Enable multi-agent mode (registry, socket, agent tools)
+--no-multi-agent               Disable multi-agent even if config enables it
 --log-level <LEVEL>            trace | debug | info | warn | error (default: info)
 --bench                        Print performance timing on exit
 ```
@@ -527,6 +539,53 @@ automatically.
 Sessions are saved automatically to `~/.local/state/agent/sessions/` (respects
 `$XDG_STATE_HOME`) and restored on SIGINT/SIGTERM. Use `/resume` to load a
 previous session and `/fork` to branch from the current one.
+
+## Multi-Agent Mode
+
+> [!WARNING]
+>
+> **Multi-agent is experimental.** Subagents run in **yolo mode** with workspace
+> restriction — they can read, write, and execute commands within the repository
+> without asking for permission. The workspace boundary is best-effort (see
+> warning above). Use containerization for strong isolation.
+
+Enable with `--multi-agent` or `multi_agent: true` in config. When enabled, the
+agent can spawn parallel subagents, discover peer agents in the same repository,
+and communicate via message passing.
+
+**Tools available in multi-agent mode:**
+
+| Tool              | Description                                            |
+| ----------------- | ------------------------------------------------------ |
+| `spawn_agent`     | Spawn a subagent with a prompt (not at max depth)      |
+| `list_agents`     | List all agents in the workspace (owned + peers)       |
+| `message_agent`   | Send a message to one or more agents                   |
+| `peek_agent`      | Query another agent's context without interrupting it  |
+| `stop_agent`      | Stop a subagent when its work is done or unneeded      |
+
+Agents have human-readable names (e.g. cedar, birch). Subagents inherit the
+parent's model and are workspace-restricted. They persist between turns
+(listening for incoming messages) and self-terminate when done.
+
+Peer agents (other interactive sessions in the same repo) are automatically
+discovered and can be communicated with using the same tools.
+
+### Tab Bar
+
+Each subagent gets its own tab with full TUI rendering. The tab bar appears at
+the bottom of the screen when multi-agent mode is enabled.
+
+**Tab switching:**
+
+| Key              | Action                                |
+| ---------------- | ------------------------------------- |
+| `Left` / `Right` | Cycle tabs (when input buffer empty)  |
+| `Alt+[` / `Alt+]`| Cycle tabs (always)                   |
+| `Alt+1`..`Alt+9` | Jump to tab by number                 |
+| `gt` / `gT`      | Next / previous tab (vim normal mode) |
+
+**Commands available on subagent tabs:** `/exit` (kills subagent), `/export`,
+`/color`, `/stats`, `/agents`, `/btw`, `!cmd`. Other commands are parent-only.
 
 ## Development
 

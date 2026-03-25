@@ -12,7 +12,7 @@ impl Tool for BashTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a non-interactive bash command and return its output. The working directory persists between calls. Commands time out after 2 minutes by default (configurable up to 10 minutes). Use run_in_background for long-running processes. Do not run interactive commands (editors, pagers, interactive rebases, etc.) — they will hang. If there is no non-interactive alternative, ask the user to run it themselves."
+        "Execute a non-interactive bash command and return its output. The working directory persists between calls. Commands time out after 2 minutes by default (configurable up to 10 minutes). For long-running processes set run_in_background=true. Do not use shell backgrounding (`&`) in the command string. Do not run interactive commands (editors, pagers, interactive rebases, etc.) — they will hang. If there is no non-interactive alternative, ask the user to run it themselves."
     }
 
     fn parameters(&self) -> Value {
@@ -57,10 +57,11 @@ impl Tool for BashTool {
             let command = str_arg(&args, "command");
 
             if let Some(msg) = check_interactive(&command) {
-                return ToolResult {
-                    content: msg.to_string(),
-                    is_error: true,
-                };
+                return ToolResult::err(msg.to_string());
+            }
+
+            if let Some(msg) = check_shell_background_operator(&command) {
+                return ToolResult::err(msg);
             }
 
             if bool_arg(&args, "run_in_background") {
@@ -109,6 +110,21 @@ fn check_interactive(command: &str) -> Option<&'static str> {
     None
 }
 
+fn check_shell_background_operator(command: &str) -> Option<String> {
+    let has_background_operator = crate::permissions::split_shell_commands_with_ops(command)
+        .iter()
+        .any(|(_, op)| op.as_deref() == Some("&"));
+
+    if has_background_operator {
+        Some(
+            "Shell backgrounding (`&`) is not supported in `bash` commands here. Remove `&` and set `run_in_background=true` on the tool call. Then use `read_process_output` and `stop_process` with the returned process id."
+                .to_string(),
+        )
+    } else {
+        None
+    }
+}
+
 async fn execute_background(command: &str, ctx: &ToolContext<'_>) -> ToolResult {
     match tokio::process::Command::new("sh")
         .arg("-c")
@@ -122,15 +138,9 @@ async fn execute_background(command: &str, ctx: &ToolContext<'_>) -> ToolResult 
             let id = ctx.processes.next_id();
             ctx.processes
                 .spawn(id.clone(), command, child, ctx.proc_done_tx.clone());
-            ToolResult {
-                content: format!("background process started with id: {id}"),
-                is_error: false,
-            }
+            ToolResult::ok(format!("background process started with id: {id}"))
         }
-        Err(e) => ToolResult {
-            content: e.to_string(),
-            is_error: true,
-        },
+        Err(e) => ToolResult::err(e.to_string()),
     }
 }
 
@@ -150,12 +160,7 @@ async fn execute_streaming(
         .spawn()
     {
         Ok(c) => c,
-        Err(e) => {
-            return ToolResult {
-                content: e.to_string(),
-                is_error: true,
-            }
-        }
+        Err(e) => return ToolResult::err(e.to_string()),
     };
 
     let stdout = child.stdout.take().unwrap();
@@ -202,17 +207,11 @@ async fn execute_streaming(
             }
             _ = &mut deadline => {
                 let _ = child.kill().await;
-                return ToolResult {
-                    content: format!("timed out after {:.0}s", timeout.as_secs_f64()),
-                    is_error: true,
-                };
+                return ToolResult::err(format!("timed out after {:.0}s", timeout.as_secs_f64()));
             }
             _ = ctx.cancel.cancelled() => {
                 let _ = child.kill().await;
-                return ToolResult {
-                    content: "cancelled".into(),
-                    is_error: true,
-                };
+                return ToolResult::err("cancelled");
             }
         }
     }
@@ -222,6 +221,7 @@ async fn execute_streaming(
     ToolResult {
         content: output,
         is_error,
+        metadata: None,
     }
 }
 
@@ -337,5 +337,20 @@ mod tests {
     #[test]
     fn interactive_with_path_blocked() {
         assert!(check_interactive("/usr/bin/vim file.txt").is_some());
+    }
+
+    #[test]
+    fn shell_background_operator_blocked() {
+        assert!(check_shell_background_operator("sleep 10 &").is_some());
+    }
+
+    #[test]
+    fn shell_background_operator_in_chain_blocked() {
+        assert!(check_shell_background_operator("echo hi & echo done").is_some());
+    }
+
+    #[test]
+    fn redirection_with_ampersand_allowed() {
+        assert!(check_shell_background_operator("bun run dev 2>&1").is_none());
     }
 }

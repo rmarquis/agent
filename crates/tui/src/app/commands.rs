@@ -43,6 +43,21 @@ impl App {
                 self.export_to_clipboard();
                 CommandAction::Continue
             }
+            "/agents" if self.multi_agent => {
+                let my_pid = std::process::id();
+                let children = engine::registry::children_of(my_pid);
+                if children.is_empty() {
+                    self.screen.notify_error("no subagents running".into());
+                    CommandAction::Continue
+                } else {
+                    CommandAction::OpenDialog(Box::new(render::AgentsDialog::new(
+                        my_pid,
+                        self.agent_snapshots.clone(),
+                        None,
+                        self.input.vim_enabled(),
+                    )))
+                }
+            }
             "/ps" => {
                 if self.engine.processes.list().is_empty() {
                     self.screen.notify_error("no background processes".into());
@@ -462,6 +477,18 @@ fn format_conversation_markdown(history: &[Message], session: &crate::session::S
             Role::Tool => {
                 // Already inlined under their tool call — skip.
             }
+            Role::Agent => {
+                let id = msg.agent_from_id.as_deref().unwrap_or("agent");
+                let slug = msg.agent_from_slug.as_deref().unwrap_or("");
+                if slug.is_empty() {
+                    let _ = writeln!(out, "## Agent: {id}\n");
+                } else {
+                    let _ = writeln!(out, "## Agent: {id} ({slug})\n");
+                }
+                if let Some(c) = &msg.content {
+                    let _ = writeln!(out, "{}\n", c.text_content());
+                }
+            }
         }
     }
 
@@ -520,6 +547,7 @@ fn format_tool_call(
         "bash" => {
             let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
             if cmd.contains('\n') {
+                // Multi-line command — show full thing.
                 let _ = writeln!(out, "\n```bash\n{cmd}\n```");
             }
         }

@@ -175,6 +175,17 @@ pub struct Provider {
     model_config: crate::config::ModelConfig,
 }
 
+/// Rewrite an Agent-role message as a user message for API serialization.
+/// Agent messages are an internal concept; the LLM API sees them as user turns.
+fn fixup_agent_message(m: &Message, v: &mut serde_json::Value) {
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert("role".into(), serde_json::json!("user"));
+        obj.remove("agent_from_id");
+        obj.remove("agent_from_slug");
+        obj.insert("content".into(), serde_json::json!(m.agent_api_text()));
+    }
+}
+
 impl Provider {
     pub fn new(api_base: String, api_key: String, provider_type: &str, client: Client) -> Self {
         let api_base = api_base.trim_end_matches('/').to_string();
@@ -479,6 +490,9 @@ impl Provider {
             .iter()
             .map(|m| {
                 let mut v = serde_json::to_value(m).unwrap();
+                if m.role == Role::Agent {
+                    fixup_agent_message(m, &mut v);
+                }
                 if let Some(obj) = v.as_object_mut() {
                     obj.remove("is_error");
                     if m.role == Role::Tool {
@@ -578,6 +592,13 @@ impl Provider {
                             }));
                         }
                     }
+                }
+                Role::Agent => {
+                    input.push(serde_json::json!({
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": m.agent_api_text()}],
+                    }));
                 }
                 Role::Tool => {
                     let output = m.content.as_ref().map(|c| c.as_text()).unwrap_or_default();
@@ -780,6 +801,7 @@ impl Provider {
                     Role::User => "User",
                     Role::Assistant => "Assistant",
                     Role::System => "System",
+                    Role::Agent => "Agent",
                     Role::Tool => return None,
                 };
                 let text = m.content.as_ref().map(|c| c.as_text()).unwrap_or("");
@@ -868,7 +890,13 @@ impl Provider {
     ) -> Result<String, ProviderError> {
         let api_messages: Vec<serde_json::Value> = messages
             .iter()
-            .map(|m| serde_json::to_value(m).unwrap())
+            .map(|m| {
+                let mut v = serde_json::to_value(m).unwrap();
+                if m.role == Role::Agent {
+                    fixup_agent_message(m, &mut v);
+                }
+                v
+            })
             .collect();
         let mut body = serde_json::json!({
             "model": model,

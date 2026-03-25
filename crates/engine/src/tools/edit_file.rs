@@ -67,59 +67,46 @@ impl EditFileTool {
         let new_string = str_arg(args, "new_string");
         let replace_all = bool_arg(args, "replace_all");
 
+        // Acquire cross-process advisory lock (non-blocking).
+        let _flock = match super::try_flock(&path) {
+            Ok(guard) => Some(guard),
+            Err(e) => return ToolResult::err(e),
+        };
+
         let content = match std::fs::read_to_string(&path) {
             Ok(c) => c,
-            Err(e) => {
-                return ToolResult {
-                    content: e.to_string(),
-                    is_error: true,
-                }
-            }
+            Err(e) => return ToolResult::err(e.to_string()),
         };
 
         if let Ok(map) = self.hashes.lock() {
             match map.get(&path) {
                 None => {
-                    return ToolResult {
-                        content: "You must use read_file before editing. Read the file first."
-                            .into(),
-                        is_error: true,
-                    };
+                    return ToolResult::err(
+                        "You must use read_file before editing. Read the file first.",
+                    );
                 }
                 Some(&stored_hash) => {
                     let current_hash = hash_content(&content);
                     if stored_hash != current_hash {
-                        return ToolResult {
-                            content: "File has been modified since last read. You must use read_file to read the current contents before editing.".into(),
-                            is_error: true,
-                        };
+                        return ToolResult::err("File has been modified since last read. You must use read_file to read the current contents before editing.");
                     }
                 }
             }
         }
 
         if old_string == new_string {
-            return ToolResult {
-                content: "old_string and new_string are identical".into(),
-                is_error: true,
-            };
+            return ToolResult::err("old_string and new_string are identical");
         }
 
         let count = content.matches(&old_string).count();
         if count == 0 {
-            return ToolResult {
-                content: "old_string not found in file".into(),
-                is_error: true,
-            };
+            return ToolResult::err("old_string not found in file");
         }
         if count > 1 && !replace_all {
-            return ToolResult {
-                content: format!(
-                    "old_string found {} times — must be unique, or set replace_all to true",
-                    count
-                ),
-                is_error: true,
-            };
+            return ToolResult::err(format!(
+                "old_string found {} times — must be unique, or set replace_all to true",
+                count
+            ));
         }
 
         let new_content = if replace_all {
@@ -133,15 +120,9 @@ impl EditFileTool {
                 if let Ok(mut map) = self.hashes.lock() {
                     map.insert(path.clone(), hash_content(&new_content));
                 }
-                ToolResult {
-                    content: format!("edited {}", display_path(&path)),
-                    is_error: false,
-                }
+                ToolResult::ok(format!("edited {}", display_path(&path)))
             }
-            Err(e) => ToolResult {
-                content: e.to_string(),
-                is_error: true,
-            },
+            Err(e) => ToolResult::err(e.to_string()),
         }
     }
 }

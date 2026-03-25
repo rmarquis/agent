@@ -74,6 +74,30 @@ struct Args {
     bench: bool,
     #[arg(long, help = "Run headless (no TUI), requires a message argument")]
     headless: bool,
+    #[arg(long, help = "Run as a subagent (persistent headless with IPC)")]
+    subagent: bool,
+    #[arg(long, help = "Enable multi-agent mode (registry, socket, agent tools)")]
+    multi_agent: bool,
+    #[arg(long, help = "Disable multi-agent even if config enables it")]
+    no_multi_agent: bool,
+    #[arg(long, value_name = "PID", help = "Parent agent PID (for subagents)")]
+    parent_pid: Option<u32>,
+    #[arg(long, value_name = "N", help = "Agent depth in the spawn tree")]
+    depth: Option<u8>,
+    #[arg(
+        long,
+        value_name = "N",
+        default_value = "1",
+        help = "Maximum agent spawn depth"
+    )]
+    max_agent_depth: u8,
+    #[arg(
+        long,
+        value_name = "N",
+        default_value = "8",
+        help = "Maximum concurrent agents per session"
+    )]
+    max_agents: u8,
     #[arg(short, long, num_args = 0..=1, default_missing_value = "", value_name = "SESSION_ID")]
     resume: Option<String>,
     #[arg(
@@ -236,6 +260,26 @@ async fn main() {
         std::process::exit(1);
     }
 
+    if args.subagent {
+        if args.message.is_none() {
+            eprintln!("error: --subagent requires a message argument");
+            std::process::exit(1);
+        }
+        if args.parent_pid.is_none() || args.depth.is_none() {
+            eprintln!("error: --subagent requires --parent-pid and --depth");
+            std::process::exit(1);
+        }
+    }
+
+    // Resolve multi-agent: CLI flags override config.
+    let multi_agent = if args.no_multi_agent {
+        false
+    } else if args.multi_agent || args.subagent {
+        true
+    } else {
+        cfg.settings.multi_agent.unwrap_or(false)
+    };
+
     let mode_override = args
         .mode
         .as_deref()
@@ -248,7 +292,7 @@ async fn main() {
         });
 
     let vim_enabled = cfg.settings.vim_mode.unwrap_or(false);
-    let auto_compact = cfg.settings.auto_compact.unwrap_or(false);
+    let auto_compact = args.subagent || cfg.settings.auto_compact.unwrap_or(false);
     let show_speed = cfg.settings.show_speed.unwrap_or(true);
     let input_prediction = cfg.settings.input_prediction.unwrap_or(true);
     let task_slug = cfg.settings.task_slug.unwrap_or(true);
@@ -361,6 +405,10 @@ async fn main() {
                     tui::session::print_resume_hint(&id);
                 }
             }
+            // Kill child agents on shutdown.
+            if multi_agent {
+                engine::registry::cleanup_self(std::process::id());
+            }
             std::process::exit(0);
         });
     }
@@ -386,6 +434,15 @@ async fn main() {
     let permissions = Arc::new(permissions);
     let initial_api_base = api_base.clone();
     let initial_provider_type = provider_type.clone();
+    let engine_injector;
+    // Pick the interactive root agent ID once and share it across
+    // engine tools + registry registration to avoid identity drift.
+    let planned_agent_id = if multi_agent && !args.subagent {
+        Some(engine::registry::next_agent_id())
+    } else {
+        None
+    };
+
     let engine_handle = engine::start(engine::EngineConfig {
         api_base,
         api_key,
@@ -401,10 +458,23 @@ async fn main() {
         },
         instructions,
         system_prompt_override,
-        cwd,
+        cwd: cwd.clone(),
         permissions: permissions.clone(),
-        interactive: !args.headless,
+        api_key_env: api_key_env.clone(),
+        multi_agent: if multi_agent {
+            Some(engine::MultiAgentConfig {
+                depth: args.depth.unwrap_or(0),
+                max_depth: args.max_agent_depth,
+                max_agents: args.max_agents,
+                parent_pid: args.parent_pid,
+                agent_id: planned_agent_id.clone(),
+            })
+        } else {
+            None
+        },
+        interactive: !args.headless && !args.subagent,
     });
+    engine_injector = engine_handle.injector();
 
     // Fetch context window in background (only needed for interactive mode)
     let ctx_rx = if !args.headless {
@@ -450,6 +520,7 @@ async fn main() {
         input_prediction,
         task_slug,
         restrict_to_workspace,
+        multi_agent,
         reasoning_effort,
         reasoning_cycle,
         mode_cycle,
@@ -474,16 +545,115 @@ async fn main() {
         }
     }
 
-    if args.headless {
+    if args.subagent {
+        let parent_pid = args.parent_pid.unwrap();
+        let depth = args.depth.unwrap();
+        let my_pid = std::process::id();
+
+        // Request SIGTERM when parent dies (Linux only).
+        #[cfg(target_os = "linux")]
+        unsafe {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+            // Check if parent already died between our fork and prctl.
+            if !engine::registry::is_pid_alive(parent_pid) {
+                std::process::exit(1);
+            }
+        }
+
+        // Start socket listener.
+        let (socket_path, socket_rx) =
+            engine::socket::start_listener(my_pid).expect("failed to start agent socket");
+
+        // Detect scope for registry.
+        let scope = engine::paths::git_root(&cwd)
+            .unwrap_or_else(|| cwd.clone())
+            .to_string_lossy()
+            .into_owned();
+
+        // Register in the agent registry (update the pre-registered entry).
+        let branch = engine::paths::git_branch(&cwd);
+        let agent_id = engine::registry::read_entry(my_pid)
+            .ok()
+            .map(|e| e.agent_id)
+            .unwrap_or_else(|| format!("agent-{my_pid}"));
+        engine::registry::register(&engine::registry::RegistryEntry {
+            agent_id,
+            pid: my_pid,
+            parent_pid: Some(parent_pid),
+            git_root: Some(scope.clone()),
+            git_branch: branch,
+            cwd: cwd.to_string_lossy().into_owned(),
+            status: engine::registry::AgentStatus::Idle,
+            task_slug: None,
+            session_id: app.session.id.clone(),
+            socket_path: socket_path.to_string_lossy().into_owned(),
+            depth,
+            started_at: timestamp_now(),
+        })
+        .expect("failed to register agent");
+
+        app.run_subagent(args.message.unwrap(), parent_pid, socket_rx)
+            .await;
+
+        engine::registry::cleanup_self(my_pid);
+    } else if args.headless {
         app.run_headless(args.message.unwrap()).await;
     } else {
         // Redirect stderr to a log file so stray output from system processes
         // (e.g. polkit, PAM) or libraries doesn't corrupt the TUI display.
         redirect_stderr();
+
+        // Interactive mode: register if multi-agent is enabled.
+        if multi_agent {
+            let my_pid = std::process::id();
+            let scope = engine::paths::git_root(&cwd)
+                .unwrap_or_else(|| cwd.clone())
+                .to_string_lossy()
+                .into_owned();
+            let branch = engine::paths::git_branch(&cwd);
+
+            let (socket_path, socket_rx) =
+                engine::socket::start_listener(my_pid).expect("failed to start agent socket");
+
+            // Bridge socket messages to the engine.
+            spawn_socket_bridge(socket_rx, engine_injector.clone());
+
+            let my_agent_id = planned_agent_id
+                .clone()
+                .unwrap_or_else(engine::registry::next_agent_id);
+            app.agent_id = my_agent_id.clone();
+            if let Err(e) = engine::registry::register(&engine::registry::RegistryEntry {
+                agent_id: my_agent_id,
+                pid: my_pid,
+                parent_pid: None,
+                git_root: Some(scope),
+                git_branch: branch,
+                cwd: cwd.to_string_lossy().into_owned(),
+                status: engine::registry::AgentStatus::Idle,
+                task_slug: None,
+                session_id: app.session.id.clone(),
+                socket_path: socket_path.to_string_lossy().into_owned(),
+                depth: 0,
+                started_at: timestamp_now(),
+            }) {
+                eprintln!("warning: failed to register in agent registry: {e}");
+            }
+
+            // Prune dead entries on startup.
+            engine::registry::prune_dead();
+
+            // Watch for child agent deaths.
+            spawn_child_watcher(my_pid, engine_injector.clone());
+        }
+
         println!();
         app.run(ctx_rx, args.message).await;
         if !app.session.messages.is_empty() {
             tui::session::print_resume_hint(&app.session.id);
+        }
+
+        if multi_agent {
+            engine::registry::cleanup_self(std::process::id());
         }
     }
     tui::perf::print_summary();
@@ -513,4 +683,56 @@ fn redirect_stderr() {
             // description, so it stays open.
         }
     }
+}
+
+fn spawn_socket_bridge(
+    mut socket_rx: tokio::sync::mpsc::UnboundedReceiver<engine::socket::IncomingMessage>,
+    injector: engine::EventInjector,
+) {
+    tokio::spawn(async move {
+        while let Some(msg) = socket_rx.recv().await {
+            match msg {
+                engine::socket::IncomingMessage::Message {
+                    from_id,
+                    from_slug,
+                    message,
+                } => {
+                    injector.inject_agent_message(from_id, from_slug, message);
+                }
+                engine::socket::IncomingMessage::Query { reply_tx, .. } => {
+                    let _ = reply_tx.send(
+                        "agent is in interactive mode and cannot serve queries at this time".into(),
+                    );
+                }
+            }
+        }
+    });
+}
+
+fn spawn_child_watcher(parent_pid: u32, injector: engine::EventInjector) {
+    tokio::spawn(async move {
+        let mut known: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            let children = engine::registry::children_of(parent_pid);
+            let current: std::collections::HashSet<u32> = children.iter().map(|c| c.pid).collect();
+
+            for (pid, agent_id) in &known {
+                if !current.contains(pid) {
+                    injector.inject_agent_exited(agent_id.clone(), None);
+                }
+            }
+
+            known = children.into_iter().map(|c| (c.pid, c.agent_id)).collect();
+        }
+    });
+}
+
+fn timestamp_now() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    format!("{secs}")
 }

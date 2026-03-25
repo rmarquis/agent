@@ -1389,18 +1389,21 @@ impl Vim {
 
     fn handle_waiting_g(&mut self, key: KeyEvent, buf: &mut str, cpos: &mut usize) -> Action {
         self.sub = SubState::Ready;
-        if let KeyCode::Char('g') = key.code {
-            // gg → start of buffer.
-            if let Some(n) = self.count1.take() {
-                // {n}gg → go to line n.
-                *cpos = goto_line(buf, n.saturating_sub(1));
-            } else {
-                *cpos = 0;
+        let action = match key.code {
+            KeyCode::Char('g') => {
+                // gg → start of buffer.
+                if let Some(n) = self.count1.take() {
+                    *cpos = goto_line(buf, n.saturating_sub(1));
+                } else {
+                    *cpos = 0;
+                }
+                Action::Consumed
             }
-        }
+            _ => Action::Consumed,
+        };
         self.count1 = None;
         self.count2 = None;
-        Action::Consumed
+        action
     }
 
     fn handle_waiting_op_g(

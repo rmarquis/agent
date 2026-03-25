@@ -8,9 +8,9 @@ use prompt::PromptState;
 use working::WorkingState;
 
 pub use dialogs::{
-    parse_questions, ConfirmDialog, Dialog, DialogResult, HelpDialog, PermissionEntry,
-    PermissionsDialog, PsDialog, Question, QuestionDialog, QuestionOption, ResumeDialog,
-    RewindDialog,
+    parse_questions, AgentSnapshot, AgentsDialog, ConfirmDialog, Dialog, DialogResult, HelpDialog,
+    PermissionEntry, PermissionsDialog, PsDialog, Question, QuestionDialog, QuestionOption,
+    ResumeDialog, RewindDialog, SharedSnapshots,
 };
 
 use crate::attachment::{AttachmentId, AttachmentStore};
@@ -203,6 +203,7 @@ pub enum ToolStatus {
 pub struct ToolOutput {
     pub content: String,
     pub is_error: bool,
+    pub metadata: Option<serde_json::Value>,
 }
 
 pub struct ActiveExec {
@@ -211,6 +212,17 @@ pub struct ActiveExec {
     pub start_time: Instant,
     pub finished: bool,
     pub exit_code: Option<i32>,
+}
+
+/// A blocking agent rendered in the dynamic section (like an active tool).
+pub struct ActiveAgent {
+    pub agent_id: String,
+    pub slug: Option<String>,
+    pub tool_calls: Vec<crate::app::AgentToolEntry>,
+    pub status: AgentBlockStatus,
+    pub start_time: Instant,
+    /// Frozen elapsed time once the agent finishes.
+    pub final_elapsed: Option<Duration>,
 }
 
 pub struct ActiveTool {
@@ -228,7 +240,7 @@ impl ActiveTool {
     fn elapsed(&self) -> Option<Duration> {
         if matches!(
             self.name.as_str(),
-            "bash" | "web_fetch" | "read_process_output" | "stop_process"
+            "bash" | "web_fetch" | "read_process_output" | "stop_process" | "peek_agent"
         ) {
             Some(self.start_time.elapsed())
         } else {
@@ -288,6 +300,27 @@ pub enum Block {
     Compacted {
         summary: String,
     },
+    AgentMessage {
+        from_id: String,
+        from_slug: String,
+        content: String,
+    },
+    /// Inline agent block — shows a spawned subagent's progress.
+    Agent {
+        agent_id: String,
+        slug: Option<String>,
+        blocking: bool,
+        tool_calls: Vec<crate::app::AgentToolEntry>,
+        status: AgentBlockStatus,
+        elapsed: Option<Duration>,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum AgentBlockStatus {
+    Running,
+    Done,
+    Error,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -382,6 +415,7 @@ impl BlockHistory {
 pub struct Screen {
     history: BlockHistory,
     active_tools: Vec<ActiveTool>,
+    active_agent: Option<ActiveAgent>,
     active_exec: Option<ActiveExec>,
     prompt: PromptState,
     working: WorkingState,
@@ -410,6 +444,7 @@ pub struct Screen {
     /// single atomic sync block covers both the tool overlay and the dialog.
     sync_started: bool,
     running_procs: usize,
+    running_agents: usize,
     show_speed: bool,
     show_slug: bool,
     /// Whether to render the active tool above the dialog in content-only
@@ -452,6 +487,7 @@ impl Screen {
         Self {
             history: BlockHistory::new(),
             active_tools: Vec::new(),
+            active_agent: None,
             active_exec: None,
             prompt: PromptState::new(),
             working: WorkingState::new(),
@@ -465,6 +501,7 @@ impl Screen {
             pending_dialog: false,
             sync_started: false,
             running_procs: 0,
+            running_agents: 0,
             show_speed: true,
             show_slug: true,
             show_tool_in_dialog: false,
@@ -576,6 +613,77 @@ impl Screen {
         }
     }
 
+    pub fn set_agent_count(&mut self, count: usize) {
+        if count != self.running_agents {
+            self.running_agents = count;
+            self.prompt.dirty = true;
+        }
+    }
+
+    /// Start tracking a blocking agent in the dynamic section.
+    pub fn start_active_agent(&mut self, agent_id: String) {
+        self.active_agent = Some(ActiveAgent {
+            agent_id,
+            slug: None,
+            tool_calls: Vec::new(),
+            status: AgentBlockStatus::Running,
+            start_time: Instant::now(),
+            final_elapsed: None,
+        });
+        self.prompt.dirty = true;
+    }
+
+    /// Update the active blocking agent's state.
+    pub fn update_active_agent(
+        &mut self,
+        slug: Option<&str>,
+        tool_calls: &[crate::app::AgentToolEntry],
+        status: AgentBlockStatus,
+    ) {
+        if let Some(ref mut agent) = self.active_agent {
+            agent.slug = slug.map(str::to_string);
+            agent.tool_calls = tool_calls.to_vec();
+            if status != AgentBlockStatus::Running && agent.status == AgentBlockStatus::Running {
+                // Freeze the timer on completion.
+                agent.final_elapsed = Some(agent.start_time.elapsed());
+            }
+            agent.status = status;
+            self.prompt.dirty = true;
+        }
+    }
+
+    /// Mark the active agent as cancelled/error (before flush commits it).
+    pub fn cancel_active_agent(&mut self) {
+        if let Some(ref mut agent) = self.active_agent {
+            agent.status = AgentBlockStatus::Error;
+            agent.final_elapsed = Some(agent.start_time.elapsed());
+        }
+    }
+
+    /// Commit the active agent to history and clear the dynamic slot.
+    pub fn finish_active_agent(&mut self) {
+        if let Some(mut agent) = self.active_agent.take() {
+            // If still marked Running, the tool returned successfully —
+            // the subagent's TurnComplete may not have been drained yet.
+            if agent.status == AgentBlockStatus::Running {
+                agent.status = AgentBlockStatus::Done;
+                agent.final_elapsed = Some(agent.start_time.elapsed());
+            }
+            let elapsed = agent
+                .final_elapsed
+                .unwrap_or_else(|| agent.start_time.elapsed());
+            self.history.push(Block::Agent {
+                agent_id: agent.agent_id,
+                slug: agent.slug,
+                blocking: true,
+                tool_calls: agent.tool_calls,
+                status: agent.status,
+                elapsed: Some(elapsed),
+            });
+            self.prompt.dirty = true;
+        }
+    }
+
     /// Whether to show the active tool above a dialog overlay.
     pub fn set_show_tool_in_dialog(&mut self, show: bool) {
         self.show_tool_in_dialog = show;
@@ -646,26 +754,29 @@ impl Screen {
             }
         }
         self.prompt.anchor_row = Some(clear_from);
-        self.prompt.drawn = true;
+        self.prompt.drawn = false;
         self.prompt.dirty = true;
         self.prompt.prev_rows = 0;
+        self.prompt.prev_dialog_row = None;
     }
 
     /// Move the cursor to the line after the prompt so the shell resumes cleanly.
-    pub fn move_cursor_past_prompt(&self) {
-        if self.prompt.drawn {
-            let anchor = self.prompt.anchor_row.unwrap_or(0);
-            let end_row = anchor + self.prompt.prev_rows;
-            let height = terminal::size().map(|(_, h)| h).unwrap_or(24);
-            let mut out = RenderOut::scroll();
-            let _ = out.queue(cursor::MoveTo(0, end_row));
-            // At the terminal bottom there's no row below to land on —
-            // emit a newline so the shell prompt gets a fresh line.
-            if end_row >= height.saturating_sub(1) {
-                let _ = out.queue(Print("\n"));
-            }
-            let _ = out.flush();
+    /// When `clear_below` is true, clears remaining rows (completions).
+    pub fn move_cursor_past_prompt(&self, clear_below: bool) {
+        if !self.prompt.drawn {
+            return;
         }
+        let anchor = self.prompt.anchor_row.unwrap_or(0);
+        let end_row = anchor + self.prompt.prev_rows;
+        let height = terminal::size().map(|(_, h)| h).unwrap_or(24);
+        let mut out = RenderOut::scroll();
+        let _ = out.queue(cursor::MoveTo(0, end_row.min(height.saturating_sub(1))));
+        if clear_below {
+            // Clear everything below to remove any leftover tab bar / completions.
+            let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
+        }
+        let _ = out.queue(Print("\n"));
+        let _ = out.flush();
     }
 
     pub fn begin_turn(&mut self) {
@@ -674,6 +785,51 @@ impl Screen {
     }
 
     pub fn push(&mut self, block: Block) {
+        let block = match block {
+            Block::Text { content } => {
+                let t = content.trim();
+                if t.is_empty() {
+                    return;
+                }
+                Block::Text {
+                    content: t.to_string(),
+                }
+            }
+            Block::AgentMessage {
+                from_id,
+                from_slug,
+                content,
+            } => {
+                let t = content.trim();
+                if t.is_empty() {
+                    return;
+                }
+                Block::AgentMessage {
+                    from_id,
+                    from_slug,
+                    content: t.to_string(),
+                }
+            }
+            Block::Thinking { content } => {
+                let t = content.trim();
+                if t.is_empty() {
+                    return;
+                }
+                Block::Thinking {
+                    content: t.to_string(),
+                }
+            }
+            Block::Compacted { summary } => {
+                let t = summary.trim();
+                if t.is_empty() {
+                    return;
+                }
+                Block::Compacted {
+                    summary: t.to_string(),
+                }
+            }
+            other => other,
+        };
         self.history.push(block);
         self.prompt.dirty = true;
     }
@@ -772,6 +928,7 @@ impl Screen {
                     tool.output = Some(ToolOutput {
                         content: chunk.to_string(),
                         is_error: false,
+                        metadata: None,
                     });
                 }
             }
@@ -788,6 +945,7 @@ impl Screen {
                     *output = Some(ToolOutput {
                         content: chunk.to_string(),
                         is_error: false,
+                        metadata: None,
                     });
                 }
             }
@@ -981,6 +1139,7 @@ impl Screen {
     }
 
     pub fn commit_active_tools_as(&mut self, status: ToolStatus) {
+        self.finish_active_agent();
         for tool in self.active_tools.drain(..) {
             let elapsed = if status == ToolStatus::Denied {
                 None
@@ -1017,6 +1176,7 @@ impl Screen {
     fn has_content(&self) -> bool {
         !self.history.blocks.is_empty()
             || !self.active_tools.is_empty()
+            || self.active_agent.is_some()
             || self.active_exec.is_some()
     }
 
@@ -1155,6 +1315,7 @@ impl Screen {
     pub fn clear(&mut self) {
         self.history.clear();
         self.active_tools.clear();
+        self.active_agent = None;
         self.active_exec = None;
         self.prompt = PromptState::new();
         self.prompt.anchor_row = Some(0);
@@ -1196,6 +1357,7 @@ impl Screen {
     pub fn truncate_to(&mut self, block_idx: usize) {
         self.history.truncate(block_idx);
         self.active_tools.clear();
+        self.active_agent = None;
         self.redraw(true);
     }
 
@@ -1303,11 +1465,43 @@ impl Screen {
             }
         }
 
+        // ── Render active blocking agent ───────────────────────────
+        if show_active {
+            if let Some(ref agent) = self.active_agent {
+                let agent_gap = if !self.active_tools.is_empty() {
+                    1
+                } else if let Some(last) = self.history.blocks.last() {
+                    gap_between(&Element::Block(last), &Element::ActiveTool)
+                } else {
+                    0
+                };
+                for _ in 0..agent_gap {
+                    crlf(&mut out);
+                }
+                let elapsed = agent
+                    .final_elapsed
+                    .unwrap_or_else(|| agent.start_time.elapsed());
+                let rows = blocks::render_block(
+                    &mut out,
+                    &Block::Agent {
+                        agent_id: agent.agent_id.clone(),
+                        slug: agent.slug.clone(),
+                        blocking: true,
+                        tool_calls: agent.tool_calls.clone(),
+                        status: agent.status,
+                        elapsed: Some(elapsed),
+                    },
+                    width,
+                );
+                active_rows += agent_gap + rows;
+            }
+        }
+
         // ── Render active exec ──────────────────────────────────────
         if show_active {
             if let Some(ref exec) = self.active_exec {
-                let exec_gap = if !self.active_tools.is_empty() {
-                    gap_between(&Element::ActiveTool, &Element::ActiveExec)
+                let exec_gap = if self.active_agent.is_some() || !self.active_tools.is_empty() {
+                    1
                 } else if let Some(last) = self.history.blocks.last() {
                     gap_between(&Element::Block(last), &Element::ActiveExec)
                 } else {
@@ -1472,8 +1666,8 @@ impl Screen {
                                 text: " compacting".into(),
                                 color: Color::Reset,
                                 bg: None,
-                                attr: Some(crossterm::style::Attribute::Bold),
-                                priority: 0,
+                                attr: None,
+                                priority: 1,
                             },
                         );
                     }
@@ -1530,27 +1724,6 @@ impl Screen {
                 bg: None,
                 attr: None,
                 priority: 1,
-            });
-        }
-        if self.running_procs > 0 {
-            right_spans.push(BarSpan {
-                text: " · ".into(),
-                color: bar_color,
-                bg: None,
-                attr: None,
-                priority: 0,
-            });
-            let label = if self.running_procs == 1 {
-                "1 proc".to_string()
-            } else {
-                format!("{} procs", self.running_procs)
-            };
-            right_spans.push(BarSpan {
-                text: label,
-                color: theme::accent(),
-                bg: None,
-                attr: None,
-                priority: 0,
             });
         }
         if self.pending_dialog {
@@ -1624,7 +1797,10 @@ impl Screen {
         };
         let mut comp_rows = comp_total;
 
-        let fixed_base = stash_rows + queued_rows + 2;
+        // Reserve space for the status line (always shown when no completions/menus).
+        let status_line_reserve: usize = if comp_total == 0 { 2 } else { 0 };
+
+        let fixed_base = stash_rows + queued_rows + 2 + status_line_reserve;
         let mut fixed = fixed_base + comp_rows;
         let mut max_content_rows = height.saturating_sub(fixed);
         if max_content_rows == 0 {
@@ -1824,20 +2000,53 @@ impl Screen {
             bar_color,
         );
 
-        // Vim mode indicator line: show "-- NORMAL --" etc. when in
-        // normal/visual mode. Hidden when completions or menus are visible.
-        let vim_indicator_rows = if comp_rows == 0 {
-            if let Some(label) = vim_mode_label(state.vim_mode()) {
-                let _ = out.queue(Print("\r\n"));
-                let _ = out.queue(Print(" "));
-                let _ = out.queue(SetAttribute(Attribute::Bold));
+        // Status line below the prompt: vim mode + procs + agents + blank line.
+        // Always shown unless completions or menus are visible.
+        let status_line_rows = if comp_rows == 0 {
+            let vim_label = vim_mode_label(state.vim_mode());
+
+            let _ = out.queue(Print("\r\n"));
+            let _ = out.queue(Print(" "));
+            if let Some(label) = vim_label {
+                let _ = out.queue(SetAttribute(Attribute::Dim));
                 let _ = out.queue(Print(label));
                 let _ = out.queue(SetAttribute(Attribute::Reset));
-                let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
-                1
-            } else {
-                0
             }
+            if self.running_procs > 0 {
+                if vim_label.is_some() {
+                    let _ = out.queue(Print("  "));
+                }
+                let _ = out.queue(SetForegroundColor(theme::accent()));
+                let label = if self.running_procs == 1 {
+                    "1 proc".to_string()
+                } else {
+                    format!("{} procs", self.running_procs)
+                };
+                let _ = out.queue(Print(&label));
+                let _ = out.queue(ResetColor);
+            }
+            if self.running_agents > 0 {
+                if self.running_procs > 0 {
+                    let _ = out.queue(SetAttribute(Attribute::Dim));
+                    let _ = out.queue(Print(" · "));
+                    let _ = out.queue(SetAttribute(Attribute::NormalIntensity));
+                } else if vim_label.is_some() {
+                    let _ = out.queue(Print("  "));
+                }
+                let _ = out.queue(SetForegroundColor(theme::AGENT));
+                let label = if self.running_agents == 1 {
+                    "1 agent".to_string()
+                } else {
+                    format!("{} agents", self.running_agents)
+                };
+                let _ = out.queue(Print(&label));
+                let _ = out.queue(ResetColor);
+            }
+            let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
+            // Blank line below the status line.
+            let _ = out.queue(Print("\r\n"));
+            let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
+            2
         } else {
             0
         };
@@ -1857,7 +2066,7 @@ impl Screen {
             + 1
             + content_rows
             + 1
-            + vim_indicator_rows
+            + status_line_rows
             + comp_rows;
         let new_rows = total_rows as u16;
 

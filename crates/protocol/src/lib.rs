@@ -276,6 +276,19 @@ pub enum EngineEvent {
 
     /// Engine is shutting down.
     Shutdown { reason: Option<String> },
+
+    /// A subagent exited (expected or unexpected).
+    AgentExited {
+        agent_id: String,
+        exit_code: Option<i32>,
+    },
+
+    /// An inter-agent message arrived via the socket.
+    AgentMessage {
+        from_id: String,
+        from_slug: String,
+        message: String,
+    },
 }
 
 // ── UI → Engine ─────────────────────────────────────────────────────────────
@@ -378,6 +391,13 @@ pub enum UiCommand {
 
     /// Cancel the current turn.
     Cancel,
+
+    /// Inject an inter-agent message as a steer message.
+    AgentMessage {
+        from_id: String,
+        from_slug: String,
+        message: String,
+    },
 }
 
 // ── Shared Domain Types ─────────────────────────────────────────────────────
@@ -457,6 +477,11 @@ pub struct Message {
     /// Whether this tool result is an error. Only meaningful for `Role::Tool`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub is_error: bool,
+    /// Agent identity fields. Only meaningful for `Role::Agent`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_from_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_from_slug: Option<String>,
 }
 
 impl Message {
@@ -468,6 +493,8 @@ impl Message {
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
+            agent_from_id: None,
+            agent_from_slug: None,
         }
     }
 
@@ -479,6 +506,8 @@ impl Message {
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
+            agent_from_id: None,
+            agent_from_slug: None,
         }
     }
 
@@ -494,6 +523,8 @@ impl Message {
             tool_calls,
             tool_call_id: None,
             is_error: false,
+            agent_from_id: None,
+            agent_from_slug: None,
         }
     }
 
@@ -505,6 +536,39 @@ impl Message {
             tool_calls: None,
             tool_call_id: Some(call_id),
             is_error,
+            agent_from_id: None,
+            agent_from_slug: None,
+        }
+    }
+
+    pub fn agent(from_id: &str, from_slug: &str, message: impl Into<String>) -> Self {
+        Self {
+            role: Role::Agent,
+            content: Some(Content::text(message)),
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+            is_error: false,
+            agent_from_id: Some(from_id.to_string()),
+            agent_from_slug: Some(from_slug.to_string()),
+        }
+    }
+
+    /// Format an Agent message's content for the LLM API (which only knows
+    /// system/user/assistant/tool). Wraps in XML tags to clearly distinguish
+    /// from actual user messages.
+    pub fn agent_api_text(&self) -> String {
+        let raw = self
+            .content
+            .as_ref()
+            .map(|c| c.as_text())
+            .unwrap_or_default();
+        let id = self.agent_from_id.as_deref().unwrap_or("");
+        let slug = self.agent_from_slug.as_deref().unwrap_or("");
+        if slug.is_empty() {
+            format!("<agent-message from=\"{id}\">\n{raw}\n</agent-message>")
+        } else {
+            format!("<agent-message from=\"{id}\" task=\"{slug}\">\n{raw}\n</agent-message>")
         }
     }
 }
@@ -520,6 +584,10 @@ pub enum Role {
     User,
     Assistant,
     Tool,
+    /// Inter-agent message. Serialized as "user" for API calls (providers only
+    /// support system/user/assistant/tool), but stored distinctly in our protocol
+    /// so the TUI can render it differently.
+    Agent,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -585,6 +653,10 @@ impl<'de> Deserialize<'de> for AlwaysFunction {
 pub struct ToolOutcome {
     pub content: String,
     pub is_error: bool,
+    /// Structured metadata for tools that need to communicate machine-readable
+    /// data alongside the human-readable content string.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub metadata: Option<serde_json::Value>,
 }
 
 /// Per-turn metadata emitted by the engine at turn completion.

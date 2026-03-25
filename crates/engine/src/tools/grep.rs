@@ -172,10 +172,7 @@ fn run_grep(args: &HashMap<String, Value>) -> ToolResult {
             let result = run_command_with_timeout(child, timeout);
             if result.is_error {
                 if result.content.is_empty() {
-                    return ToolResult {
-                        content: "no matches found".into(),
-                        is_error: false,
-                    };
+                    return ToolResult::ok("no matches found");
                 }
                 return result;
             }
@@ -186,10 +183,7 @@ fn run_grep(args: &HashMap<String, Value>) -> ToolResult {
                 apply_offset_and_limit(&result.content, offset, head_limit)
             };
 
-            ToolResult {
-                content,
-                is_error: false,
-            }
+            ToolResult::ok(content)
         }
         Err(_) => grep_fallback(
             &pattern,
@@ -249,21 +243,16 @@ fn grep_fallback(
         Ok(child) => {
             let result = run_command_with_timeout(child, timeout);
             if !result.is_error && result.content.is_empty() {
-                ToolResult {
-                    content: "no matches found".into(),
-                    is_error: false,
-                }
+                ToolResult::ok("no matches found")
             } else {
                 let content = apply_offset_and_limit(&result.content, offset, head_limit);
                 ToolResult {
                     content,
                     is_error: result.is_error,
+                    metadata: None,
                 }
             }
         }
-        Err(e) => ToolResult {
-            content: e.to_string(),
-            is_error: true,
-        },
+        Err(e) => ToolResult::err(e.to_string()),
     }
 }

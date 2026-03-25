@@ -54,14 +54,8 @@ impl ReadFileTool {
 
         if image::is_image_file(&path) {
             return match image::read_image_as_data_url(&path) {
-                Ok(data_url) => ToolResult {
-                    content: format!("![image]({data_url})"),
-                    is_error: false,
-                },
-                Err(e) => ToolResult {
-                    content: e,
-                    is_error: true,
-                },
+                Ok(data_url) => ToolResult::ok(format!("![image]({data_url})")),
+                Err(e) => ToolResult::err(e),
             };
         }
 
@@ -86,12 +80,7 @@ impl ReadFileTool {
 
         let content = match std::fs::read_to_string(&path) {
             Ok(c) => c,
-            Err(e) => {
-                return ToolResult {
-                    content: e.to_string(),
-                    is_error: true,
-                }
-            }
+            Err(e) => return ToolResult::err(e.to_string()),
         };
 
         if let Ok(mut map) = self.hashes.lock() {
@@ -111,10 +100,7 @@ impl ReadFileTool {
 
         let start = offset - 1;
         if start >= lines.len() {
-            return ToolResult {
-                content: "offset beyond end of file".into(),
-                is_error: false,
-            };
+            return ToolResult::ok("offset beyond end of file");
         }
 
         let end = (start + limit).min(lines.len());
@@ -132,9 +118,6 @@ impl ReadFileTool {
             .collect::<Vec<_>>()
             .join("\n");
 
-        ToolResult {
-            content: result,
-            is_error: false,
-        }
+        ToolResult::ok(result)
     }
 }

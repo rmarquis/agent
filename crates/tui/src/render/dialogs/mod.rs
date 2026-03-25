@@ -1,3 +1,4 @@
+mod agents;
 mod confirm;
 mod help;
 mod permissions;
@@ -6,6 +7,7 @@ mod question;
 mod resume;
 mod rewind;
 
+pub use agents::{AgentSnapshot, AgentsDialog, SharedSnapshots};
 pub use confirm::ConfirmDialog;
 pub use help::HelpDialog;
 pub use permissions::{PermissionEntry, PermissionsDialog};
@@ -44,6 +46,7 @@ pub enum DialogResult {
         session_remaining: Vec<PermissionEntry>,
         workspace_remaining: Vec<crate::workspace_permissions::Rule>,
     },
+    AgentsClosed,
 }
 
 pub trait Dialog {

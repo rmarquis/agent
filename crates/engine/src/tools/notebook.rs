@@ -21,39 +21,21 @@ pub fn is_notebook(path: &str) -> bool {
 pub fn read_notebook(path: &str, offset: usize, limit: usize) -> ToolResult {
     let raw = match std::fs::read_to_string(path) {
         Ok(c) => c,
-        Err(e) => {
-            return ToolResult {
-                content: e.to_string(),
-                is_error: true,
-            }
-        }
+        Err(e) => return ToolResult::err(e.to_string()),
     };
 
     let nb: Value = match serde_json::from_str(&raw) {
         Ok(v) => v,
-        Err(e) => {
-            return ToolResult {
-                content: format!("failed to parse notebook JSON: {e}"),
-                is_error: true,
-            }
-        }
+        Err(e) => return ToolResult::err(format!("failed to parse notebook JSON: {e}")),
     };
 
     let cells = match nb.get("cells").and_then(|c| c.as_array()) {
         Some(c) => c,
-        None => {
-            return ToolResult {
-                content: "notebook has no cells array".into(),
-                is_error: false,
-            }
-        }
+        None => return ToolResult::ok("notebook has no cells array"),
     };
 
     if cells.is_empty() {
-        return ToolResult {
-            content: "notebook is empty (0 cells)".into(),
-            is_error: false,
-        };
+        return ToolResult::ok("notebook is empty (0 cells)");
     }
 
     let mut lines: Vec<String> = Vec::new();
@@ -97,10 +79,7 @@ pub fn read_notebook(path: &str, offset: usize, limit: usize) -> ToolResult {
     // Apply offset/limit (1-based offset like read_file)
     let start = (offset.max(1)) - 1;
     if start >= lines.len() {
-        return ToolResult {
-            content: "offset beyond end of notebook".into(),
-            is_error: false,
-        };
+        return ToolResult::ok("offset beyond end of notebook");
     }
     let end = (start + limit).min(lines.len());
 
@@ -111,10 +90,7 @@ pub fn read_notebook(path: &str, offset: usize, limit: usize) -> ToolResult {
         .collect::<Vec<_>>()
         .join("\n");
 
-    ToolResult {
-        content: result,
-        is_error: false,
-    }
+    ToolResult::ok(result)
 }
 
 fn render_output(output: &Value, lines: &mut Vec<String>) {
@@ -317,6 +293,21 @@ impl Tool for NotebookEditTool {
 
 fn run_edit(args: &HashMap<String, Value>, hashes: &FileHashes) -> ToolResult {
     let path = str_arg(args, "notebook_path");
+
+    if path.is_empty() {
+        return ToolResult::err("notebook_path is required");
+    }
+
+    if !Path::new(&path).exists() {
+        return ToolResult::err(format!("file not found: {}", display_path(&path)));
+    }
+
+    // Acquire cross-process advisory lock (non-blocking).
+    let _flock = match super::try_flock(&path) {
+        Ok(guard) => Some(guard),
+        Err(e) => return ToolResult::err(e),
+    };
+
     let edit_mode = {
         let m = str_arg(args, "edit_mode");
         if m.is_empty() {
@@ -330,73 +321,40 @@ fn run_edit(args: &HashMap<String, Value>, hashes: &FileHashes) -> ToolResult {
     let cell_type = str_arg(args, "cell_type");
     let cell_number = args.get("cell_number").and_then(|v| v.as_i64());
 
-    if path.is_empty() {
-        return ToolResult {
-            content: "notebook_path is required".into(),
-            is_error: true,
-        };
-    }
-
-    if !Path::new(&path).exists() {
-        return ToolResult {
-            content: format!("file not found: {}", display_path(&path)),
-            is_error: true,
-        };
-    }
-
     // Validate edit_mode
     if !matches!(edit_mode.as_str(), "replace" | "insert" | "delete") {
-        return ToolResult {
-            content: format!(
-                "invalid edit_mode: {edit_mode} (expected replace, insert, or delete)"
-            ),
-            is_error: true,
-        };
+        return ToolResult::err(format!(
+            "invalid edit_mode: {edit_mode} (expected replace, insert, or delete)"
+        ));
     }
 
     // new_source required for replace and insert
     if edit_mode != "delete" && new_source.is_empty() {
-        return ToolResult {
-            content: format!("new_source is required for {edit_mode}"),
-            is_error: true,
-        };
+        return ToolResult::err(format!("new_source is required for {edit_mode}"));
     }
 
     // cell_type required for insert
     if edit_mode == "insert" && cell_type.is_empty() {
-        return ToolResult {
-            content: "cell_type is required when inserting a new cell".into(),
-            is_error: true,
-        };
+        return ToolResult::err("cell_type is required when inserting a new cell");
     }
 
     let raw = match std::fs::read_to_string(&path) {
         Ok(c) => c,
-        Err(e) => {
-            return ToolResult {
-                content: e.to_string(),
-                is_error: true,
-            }
-        }
+        Err(e) => return ToolResult::err(e.to_string()),
     };
 
     // Check staleness against stored hash
     if let Ok(map) = hashes.lock() {
         match map.get(&path) {
             None => {
-                return ToolResult {
-                    content: "You must use read_file before editing. Read the notebook first."
-                        .into(),
-                    is_error: true,
-                };
+                return ToolResult::err(
+                    "You must use read_file before editing. Read the notebook first.",
+                );
             }
             Some(&stored_hash) => {
                 let current_hash = hash_content(&raw);
                 if stored_hash != current_hash {
-                    return ToolResult {
-                        content: "Notebook has been modified since last read. Use read_file to read the current contents before editing.".into(),
-                        is_error: true,
-                    };
+                    return ToolResult::err("Notebook has been modified since last read. Use read_file to read the current contents before editing.");
                 }
             }
         }
@@ -404,22 +362,12 @@ fn run_edit(args: &HashMap<String, Value>, hashes: &FileHashes) -> ToolResult {
 
     let mut nb: Value = match serde_json::from_str(&raw) {
         Ok(v) => v,
-        Err(e) => {
-            return ToolResult {
-                content: format!("failed to parse notebook JSON: {e}"),
-                is_error: true,
-            }
-        }
+        Err(e) => return ToolResult::err(format!("failed to parse notebook JSON: {e}")),
     };
 
     let cells = match nb.get_mut("cells").and_then(|c| c.as_array_mut()) {
         Some(c) => c,
-        None => {
-            return ToolResult {
-                content: "notebook has no cells array".into(),
-                is_error: true,
-            }
-        }
+        None => return ToolResult::err("notebook has no cells array"),
     };
 
     // Resolve target cell index
@@ -430,20 +378,14 @@ fn run_edit(args: &HashMap<String, Value>, hashes: &FileHashes) -> ToolResult {
             let idx = match target_idx {
                 Some(i) => i,
                 None => {
-                    return ToolResult {
-                        content: cell_not_found_msg(&cell_id, cell_number, cells.len()),
-                        is_error: true,
-                    }
+                    return ToolResult::err(cell_not_found_msg(&cell_id, cell_number, cells.len()))
                 }
             };
             if idx >= cells.len() {
-                return ToolResult {
-                    content: format!(
-                        "cell_number {idx} out of range (notebook has {} cells)",
-                        cells.len()
-                    ),
-                    is_error: true,
-                };
+                return ToolResult::err(format!(
+                    "cell_number {idx} out of range (notebook has {} cells)",
+                    cells.len()
+                ));
             }
 
             // Convert source to array of lines (notebook convention)
@@ -483,21 +425,19 @@ fn run_edit(args: &HashMap<String, Value>, hashes: &FileHashes) -> ToolResult {
                 match target_idx {
                     Some(i) => {
                         if i >= cells.len() {
-                            return ToolResult {
-                                content: format!(
-                                    "cell_number {i} out of range (notebook has {} cells)",
-                                    cells.len()
-                                ),
-                                is_error: true,
-                            };
+                            return ToolResult::err(format!(
+                                "cell_number {i} out of range (notebook has {} cells)",
+                                cells.len()
+                            ));
                         }
                         i + 1
                     }
                     None => {
-                        return ToolResult {
-                            content: cell_not_found_msg(&cell_id, cell_number, cells.len()),
-                            is_error: true,
-                        }
+                        return ToolResult::err(cell_not_found_msg(
+                            &cell_id,
+                            cell_number,
+                            cells.len(),
+                        ))
                     }
                 }
             };
@@ -516,20 +456,14 @@ fn run_edit(args: &HashMap<String, Value>, hashes: &FileHashes) -> ToolResult {
             let idx = match target_idx {
                 Some(i) => i,
                 None => {
-                    return ToolResult {
-                        content: cell_not_found_msg(&cell_id, cell_number, cells.len()),
-                        is_error: true,
-                    }
+                    return ToolResult::err(cell_not_found_msg(&cell_id, cell_number, cells.len()))
                 }
             };
             if idx >= cells.len() {
-                return ToolResult {
-                    content: format!(
-                        "cell_number {idx} out of range (notebook has {} cells)",
-                        cells.len()
-                    ),
-                    is_error: true,
-                };
+                return ToolResult::err(format!(
+                    "cell_number {idx} out of range (notebook has {} cells)",
+                    cells.len()
+                ));
             }
 
             cells.remove(idx);
@@ -612,19 +546,11 @@ fn write_notebook(path: &str, nb: &Value, action: &str, hashes: &FileHashes) -> 
     let formatter = serde_json::ser::PrettyFormatter::with_indent(b" ");
     let mut ser = serde_json::Serializer::with_formatter(&mut buf, formatter);
     if let Err(e) = nb.serialize(&mut ser) {
-        return ToolResult {
-            content: format!("failed to serialize notebook: {e}"),
-            is_error: true,
-        };
+        return ToolResult::err(format!("failed to serialize notebook: {e}"));
     }
     let mut json = match String::from_utf8(buf) {
         Ok(s) => s,
-        Err(e) => {
-            return ToolResult {
-                content: format!("failed to serialize notebook: {e}"),
-                is_error: true,
-            }
-        }
+        Err(e) => return ToolResult::err(format!("failed to serialize notebook: {e}")),
     };
 
     // Ensure trailing newline
@@ -637,14 +563,8 @@ fn write_notebook(path: &str, nb: &Value, action: &str, hashes: &FileHashes) -> 
             if let Ok(mut map) = hashes.lock() {
                 map.insert(path.to_string(), hash_content(&json));
             }
-            ToolResult {
-                content: format!("{action} in {}", display_path(path)),
-                is_error: false,
-            }
+            ToolResult::ok(format!("{action} in {}", display_path(path)))
         }
-        Err(e) => ToolResult {
-            content: e.to_string(),
-            is_error: true,
-        },
+        Err(e) => ToolResult::err(e.to_string()),
     }
 }
