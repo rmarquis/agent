@@ -455,7 +455,8 @@ impl<'a> Turn<'a> {
             // Recompute tool definitions each iteration — mode may have
             // changed (e.g. Plan → Apply after plan approval).
             let tool_defs: Vec<ToolDefinition> = if self.provider.tool_calling() {
-                self.registry.definitions(self.permissions, self.mode, self.config.interactive)
+                self.registry
+                    .definitions(self.permissions, self.mode, self.config.interactive)
             } else {
                 Vec::new()
             };

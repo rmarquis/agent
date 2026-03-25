@@ -114,7 +114,12 @@ impl ToolRegistry {
             .map(|t| t.as_ref())
     }
 
-    pub fn definitions(&self, permissions: &Permissions, mode: Mode, interactive: bool) -> Vec<ToolDefinition> {
+    pub fn definitions(
+        &self,
+        permissions: &Permissions,
+        mode: Mode,
+        interactive: bool,
+    ) -> Vec<ToolDefinition> {
         self.tools
             .iter()
             .filter(|t| {

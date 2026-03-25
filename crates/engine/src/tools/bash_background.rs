@@ -32,14 +32,14 @@ impl Tool for ReadProcessOutputTool {
     }
 
     fn description(&self) -> &str {
-        "Read output from a background process. Blocks until the process finishes by default. Set block=false for a non-blocking check of current output."
+        "Read output from a background bash process (proc_1, proc_2, etc). Blocks until the process finishes by default. Set block=false for a non-blocking check of current output."
     }
 
     fn parameters(&self) -> Value {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "id": {"type": "string", "description": "Process ID (e.g. proc_1)"},
+                "id": {"type": "string", "description": "Bash process ID (e.g. proc_1)"},
                 "block": {"type": "boolean", "description": "Wait for process to finish (default: true). Set to false for a non-blocking check."},
                 "timeout_ms": {"type": "integer", "description": "Max wait time in ms when blocking (default: 30000)"}
             },
@@ -126,14 +126,14 @@ impl Tool for StopProcessTool {
     }
 
     fn description(&self) -> &str {
-        "Stop a running background process and return its accumulated output."
+        "Stop a running background bash process and return its accumulated output."
     }
 
     fn parameters(&self) -> Value {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "id": {"type": "string", "description": "Process ID (e.g. proc_1)"}
+                "id": {"type": "string", "description": "Bash process ID (e.g. proc_1)"}
             },
             "required": ["id"]
         })

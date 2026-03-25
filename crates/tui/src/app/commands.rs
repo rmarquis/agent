@@ -367,10 +367,7 @@ impl App {
 
 // ── Markdown export ─────────────────────────────────────────────────────────
 
-fn format_conversation_markdown(
-    history: &[Message],
-    session: &crate::session::Session,
-) -> String {
+fn format_conversation_markdown(history: &[Message], session: &crate::session::Session) -> String {
     use std::collections::HashMap;
     use std::fmt::Write;
 
@@ -398,7 +395,10 @@ fn format_conversation_markdown(
         meta_parts.push(format!("**CWD:** `{cwd}`"));
     }
     if session.created_at_ms > 0 {
-        meta_parts.push(format!("**Date:** {}", format_timestamp(session.created_at_ms)));
+        meta_parts.push(format!(
+            "**Date:** {}",
+            format_timestamp(session.created_at_ms)
+        ));
     }
     if !meta_parts.is_empty() {
         let _ = writeln!(out, "{}\n", meta_parts.join(" · "));
@@ -413,7 +413,12 @@ fn format_conversation_markdown(
                     let text = c.as_text();
                     // System prompts can be very long — truncate for readability.
                     if text.len() > 500 {
-                        let _ = writeln!(out, "{}\n\n*({} chars truncated)*\n", &text[..500], text.len() - 500);
+                        let _ = writeln!(
+                            out,
+                            "{}\n\n*({} chars truncated)*\n",
+                            &text[..500],
+                            text.len() - 500
+                        );
                     } else {
                         let _ = writeln!(out, "{text}\n");
                     }
@@ -484,8 +489,14 @@ fn format_tool_call(
     match name.as_str() {
         "edit_file" => {
             let file = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
-            let old = args.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
-            let new = args.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
+            let old = args
+                .get("old_string")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let new = args
+                .get("new_string")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             if !file.is_empty() {
                 let _ = writeln!(out, "\n```diff");
                 for line in old.lines() {

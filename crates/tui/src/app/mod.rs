@@ -910,84 +910,6 @@ where
     std::future::poll_fn(|cx| Pin::new(&mut *stream).poll_next(cx)).await
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // ── is_allowed_while_running ─────────────────────────────────────
-
-    #[test]
-    fn running_allowed_commands() {
-        assert!(is_allowed_while_running("/vim").is_ok());
-        assert!(is_allowed_while_running("/export").is_ok());
-        assert!(is_allowed_while_running("/ps").is_ok());
-        assert!(is_allowed_while_running("/exit").is_ok());
-        assert!(is_allowed_while_running("/quit").is_ok());
-        assert!(is_allowed_while_running("/clear").is_ok());
-        assert!(is_allowed_while_running("/model").is_ok());
-        assert!(is_allowed_while_running("/settings").is_ok());
-        assert!(is_allowed_while_running("/theme").is_ok());
-        assert!(is_allowed_while_running("/stats").is_ok());
-        assert!(is_allowed_while_running("!ls").is_ok());
-    }
-
-    #[test]
-    fn running_blocked_commands() {
-        assert!(is_allowed_while_running("/compact").is_err());
-        assert!(is_allowed_while_running("/resume").is_err());
-    }
-
-    // ── classify_startup_command ──────────────────────────────────────
-
-    #[test]
-    fn startup_normal_message_is_none() {
-        assert!(classify_startup_command("fix the bug").is_none());
-    }
-
-    #[test]
-    fn startup_shell_escape_is_none() {
-        assert!(classify_startup_command("!ls -la").is_none());
-    }
-
-    #[test]
-    fn startup_resume_is_none() {
-        // /resume opens its UI, not blocked
-        assert!(classify_startup_command("/resume").is_none());
-    }
-
-    #[test]
-    fn startup_settings_is_none() {
-        // /settings opens its UI, not blocked
-        assert!(classify_startup_command("/settings").is_none());
-    }
-
-    #[test]
-    fn startup_vim_is_blocked() {
-        assert!(classify_startup_command("/vim").is_some());
-    }
-
-    #[test]
-    fn startup_exit_is_blocked() {
-        assert!(classify_startup_command("/exit").is_some());
-    }
-
-    #[test]
-    fn startup_compact_is_blocked() {
-        assert!(classify_startup_command("/compact").is_some());
-    }
-
-    #[test]
-    fn startup_clear_is_blocked() {
-        assert!(classify_startup_command("/clear").is_some());
-    }
-
-    #[test]
-    fn startup_unknown_slash_not_a_command() {
-        // Not a recognized command — should pass through as a message
-        assert!(classify_startup_command("/unknown").is_none());
-    }
-}
-
 // ── Headless logging helpers ─────────────────────────────────────────────────
 
 fn stderr_supports_color() -> bool {
@@ -1027,13 +949,25 @@ fn ansi_fg(c: crossterm::style::Color) -> &'static str {
 }
 
 fn reset() -> &'static str {
-    if stderr_supports_color() { "\x1b[0m" } else { "" }
+    if stderr_supports_color() {
+        "\x1b[0m"
+    } else {
+        ""
+    }
 }
 fn dim() -> &'static str {
-    if stderr_supports_color() { "\x1b[2m" } else { "" }
+    if stderr_supports_color() {
+        "\x1b[2m"
+    } else {
+        ""
+    }
 }
 fn dim_italic() -> &'static str {
-    if stderr_supports_color() { "\x1b[2;3m" } else { "" }
+    if stderr_supports_color() {
+        "\x1b[2;3m"
+    } else {
+        ""
+    }
 }
 
 fn log_thinking(content: &str) {
@@ -1112,5 +1046,83 @@ fn format_elapsed(ms: Option<u64>) -> String {
         Some(ms) if ms >= 1000 => format!("{:.1}s", ms as f64 / 1000.0),
         Some(ms) => format!("{ms}ms"),
         None => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── is_allowed_while_running ─────────────────────────────────────
+
+    #[test]
+    fn running_allowed_commands() {
+        assert!(is_allowed_while_running("/vim").is_ok());
+        assert!(is_allowed_while_running("/export").is_ok());
+        assert!(is_allowed_while_running("/ps").is_ok());
+        assert!(is_allowed_while_running("/exit").is_ok());
+        assert!(is_allowed_while_running("/quit").is_ok());
+        assert!(is_allowed_while_running("/clear").is_ok());
+        assert!(is_allowed_while_running("/model").is_ok());
+        assert!(is_allowed_while_running("/settings").is_ok());
+        assert!(is_allowed_while_running("/theme").is_ok());
+        assert!(is_allowed_while_running("/stats").is_ok());
+        assert!(is_allowed_while_running("!ls").is_ok());
+    }
+
+    #[test]
+    fn running_blocked_commands() {
+        assert!(is_allowed_while_running("/compact").is_err());
+        assert!(is_allowed_while_running("/resume").is_err());
+    }
+
+    // ── classify_startup_command ──────────────────────────────────────
+
+    #[test]
+    fn startup_normal_message_is_none() {
+        assert!(classify_startup_command("fix the bug").is_none());
+    }
+
+    #[test]
+    fn startup_shell_escape_is_none() {
+        assert!(classify_startup_command("!ls -la").is_none());
+    }
+
+    #[test]
+    fn startup_resume_is_none() {
+        // /resume opens its UI, not blocked
+        assert!(classify_startup_command("/resume").is_none());
+    }
+
+    #[test]
+    fn startup_settings_is_none() {
+        // /settings opens its UI, not blocked
+        assert!(classify_startup_command("/settings").is_none());
+    }
+
+    #[test]
+    fn startup_vim_is_blocked() {
+        assert!(classify_startup_command("/vim").is_some());
+    }
+
+    #[test]
+    fn startup_exit_is_blocked() {
+        assert!(classify_startup_command("/exit").is_some());
+    }
+
+    #[test]
+    fn startup_compact_is_blocked() {
+        assert!(classify_startup_command("/compact").is_some());
+    }
+
+    #[test]
+    fn startup_clear_is_blocked() {
+        assert!(classify_startup_command("/clear").is_some());
+    }
+
+    #[test]
+    fn startup_unknown_slash_not_a_command() {
+        // Not a recognized command — should pass through as a message
+        assert!(classify_startup_command("/unknown").is_none());
     }
 }
