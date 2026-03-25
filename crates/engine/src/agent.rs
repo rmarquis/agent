@@ -833,6 +833,13 @@ impl<'a> Turn<'a> {
                 "The user's permission settings blocked this tool call. Try a different approach or ask the user for guidance.".into()
             ),
             Decision::Allow => PermissionResult::Allow(None),
+            Decision::Ask if self.mode == Mode::Yolo
+                && self.permissions.was_downgraded(self.mode, tool_name, args) =>
+            {
+                PermissionResult::Deny(
+                    "This operation targets a path outside the workspace. Workspace restriction cannot be overridden.".into()
+                )
+            }
             Decision::Ask => {
                 let desc = tool
                     .needs_confirm(args)
