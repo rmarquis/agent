@@ -55,39 +55,39 @@ pub async fn engine_task(
                         } else {
                             &config.permissions
                         };
-                        let system_prompt = config.system_prompt_override.clone().unwrap_or_else(|| {
-                            let agent_config = if let Some(ref ma) = config.multi_agent {
-                                let scope = config.cwd.to_string_lossy();
-                                let my_pid = std::process::id();
-                                let my_entry = crate::registry::read_entry(my_pid).ok();
-                                let agent_id = my_entry
-                                    .as_ref()
+                        let agent_config = if let Some(ref ma) = config.multi_agent {
+                            let scope = config.cwd.to_string_lossy();
+                            let my_pid = std::process::id();
+                            let my_entry = crate::registry::read_entry(my_pid).ok();
+                            let agent_id = my_entry
+                                .as_ref()
+                                .map(|e| e.agent_id.clone())
+                                .unwrap_or_default();
+                            let parent_id = ma.parent_pid.and_then(|ppid| {
+                                crate::registry::read_entry(ppid)
+                                    .ok()
+                                    .map(|e| e.agent_id)
+                            });
+                            let siblings = if ma.depth > 0 {
+                                let entries = crate::registry::discover(&scope);
+                                entries
+                                    .iter()
+                                    .filter(|e| e.pid != my_pid && e.parent_pid == ma.parent_pid)
                                     .map(|e| e.agent_id.clone())
-                                    .unwrap_or_default();
-                                let parent_id = ma.parent_pid.and_then(|ppid| {
-                                    crate::registry::read_entry(ppid)
-                                        .ok()
-                                        .map(|e| e.agent_id)
-                                });
-                                let siblings = if ma.depth > 0 {
-                                    let entries = crate::registry::discover(&scope);
-                                    entries
-                                        .iter()
-                                        .filter(|e| e.pid != my_pid && e.parent_pid == ma.parent_pid)
-                                        .map(|e| e.agent_id.clone())
-                                        .collect()
-                                } else {
-                                    vec![]
-                                };
-                                Some(crate::AgentPromptConfig {
-                                    agent_id,
-                                    depth: ma.depth,
-                                    parent_id,
-                                    siblings,
-                                })
+                                    .collect()
                             } else {
-                                None
+                                vec![]
                             };
+                            Some(crate::AgentPromptConfig {
+                                agent_id,
+                                depth: ma.depth,
+                                parent_id,
+                                siblings,
+                            })
+                        } else {
+                            None
+                        };
+                        let system_prompt = config.system_prompt_override.clone().unwrap_or_else(|| {
                             crate::build_system_prompt_full(
                                 mode,
                                 &config.cwd,
@@ -112,6 +112,7 @@ pub async fn engine_task(
                             turn_id,
                             model,
                             system_prompt,
+                            agent_config,
                             session_id,
                             session_dir,
                             started_at: Instant::now(),
@@ -383,6 +384,7 @@ struct Turn<'a> {
     turn_id: u64,
     model: String,
     system_prompt: String,
+    agent_config: Option<crate::AgentPromptConfig>,
     session_id: String,
     session_dir: PathBuf,
     started_at: Instant,
@@ -393,6 +395,29 @@ struct Turn<'a> {
 impl<'a> Turn<'a> {
     fn emit(&self, event: EngineEvent) {
         let _ = self.event_tx.send(event);
+    }
+
+    /// Rebuild the system prompt after a mid-turn mode change so the LLM sees
+    /// the correct mode instructions on the next API call.
+    fn regenerate_system_prompt(&mut self) {
+        let new = self
+            .config
+            .system_prompt_override
+            .clone()
+            .unwrap_or_else(|| {
+                crate::build_system_prompt_full(
+                    self.mode,
+                    &self.config.cwd,
+                    self.config.instructions.as_deref(),
+                    self.agent_config.as_ref(),
+                )
+            });
+        self.system_prompt = new;
+        if let Some(first) = self.messages.first_mut() {
+            if matches!(first.role, Role::System) {
+                *first = Message::system(&self.system_prompt);
+            }
+        }
     }
 
     fn emit_messages_snapshot(&self) {
@@ -539,6 +564,7 @@ impl<'a> Turn<'a> {
             }
             UiCommand::SetMode { mode } => {
                 self.mode = mode;
+                self.regenerate_system_prompt();
                 true
             }
             UiCommand::SetReasoningEffort { effort } => {
@@ -596,6 +622,11 @@ impl<'a> Turn<'a> {
                 self.drain_commands();
             }
             first = false;
+
+            // Ensure the system prompt reflects the current mode — a mid-turn
+            // mode change (via SetMode) updates self.mode but the prompt may
+            // still describe the old mode.
+            self.regenerate_system_prompt();
 
             // Recompute tool definitions each iteration — mode may have
             // changed (e.g. Plan → Apply after plan approval).
@@ -1147,7 +1178,10 @@ impl<'a> Turn<'a> {
                     request_id: id,
                     answer,
                 }) if id == request_id => return answer,
-                Some(UiCommand::SetMode { mode }) => self.mode = mode,
+                Some(UiCommand::SetMode { mode }) => {
+                    self.mode = mode;
+                    self.regenerate_system_prompt();
+                }
                 Some(UiCommand::SetReasoningEffort { effort }) => self.reasoning_effort = effort,
                 Some(UiCommand::SetModel {
                     model,

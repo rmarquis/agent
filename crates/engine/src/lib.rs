@@ -95,6 +95,7 @@ pub fn build_system_prompt_full(
 }
 
 /// Configuration for the multi-agent section of the system prompt.
+#[derive(Clone)]
 pub struct AgentPromptConfig {
     pub agent_id: String,
     pub depth: u8,
