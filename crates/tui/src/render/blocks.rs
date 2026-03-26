@@ -612,7 +612,7 @@ fn print_tool_output(
             };
             print_dim_count(out, content.lines().count(), s, p)
         }
-        "web_fetch" if !is_error => render_web_fetch_output(out, content, width),
+        "web_fetch" if !is_error => print_dim_count(out, content.lines().count(), "line", "lines"),
         "edit_file" if !is_error => render_edit_output(out, args),
         "write_file" if !is_error => render_write_output(out, args),
         "ask_user_question" if !is_error => render_question_output(out, content, width),
@@ -698,10 +698,6 @@ fn render_question_output(out: &mut RenderOut, content: &str, width: usize) -> u
         }
     }
     rows
-}
-
-fn render_web_fetch_output(out: &mut RenderOut, content: &str, width: usize) -> u16 {
-    render_markdown_inner(out, content.trim(), width, "   ", true, None)
 }
 
 pub(crate) fn render_markdown_inner(

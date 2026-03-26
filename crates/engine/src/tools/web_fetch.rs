@@ -193,25 +193,25 @@ impl WebFetchTool {
             return ToolResult::ok(format!("![image](data:{mime};base64,{b64})"));
         }
 
-        if let Some(len) = response.content_length() {
-            if len as usize > MAX_RESPONSE_SIZE {
-                return ToolResult::err(format!(
-                    "Response too large: {len} bytes (max {MAX_RESPONSE_SIZE})"
-                ));
+        let (body, was_truncated) = {
+            use std::io::Read;
+            let cap = response
+                .content_length()
+                .map(|l| (l as usize).min(MAX_RESPONSE_SIZE + 1))
+                .unwrap_or(MAX_RESPONSE_SIZE + 1);
+            let mut buf = Vec::with_capacity(cap);
+            if let Err(e) = response
+                .take(MAX_RESPONSE_SIZE as u64 + 1)
+                .read_to_end(&mut buf)
+            {
+                return ToolResult::err(format!("Failed to read response: {e}"));
             }
-        }
-
-        let body = match response.text() {
-            Ok(t) => t,
-            Err(e) => return ToolResult::err(format!("Failed to read response: {e}")),
+            let truncated = buf.len() > MAX_RESPONSE_SIZE;
+            if truncated {
+                buf.truncate(MAX_RESPONSE_SIZE);
+            }
+            (String::from_utf8_lossy(&buf).into_owned(), truncated)
         };
-
-        if body.len() > MAX_RESPONSE_SIZE {
-            return ToolResult::err(format!(
-                "Response too large: {} bytes (max {MAX_RESPONSE_SIZE})",
-                body.len()
-            ));
-        }
 
         let is_html = content_type.contains("text/html") || content_type.contains("xhtml");
 
@@ -240,7 +240,10 @@ impl WebFetchTool {
             }
         }
 
-        let output = truncate_output(&output, MAX_OUTPUT_LINES, MAX_OUTPUT_BYTES);
+        let mut output = truncate_output(&output, MAX_OUTPUT_LINES, MAX_OUTPUT_BYTES);
+        if was_truncated {
+            output.push_str("\n\n[Response truncated — original response exceeded 5 MB]");
+        }
         web_cache::put(&cache_key, &output);
 
         ToolResult::ok(output)
