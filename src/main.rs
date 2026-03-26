@@ -615,8 +615,10 @@ async fn main() {
             let (socket_path, socket_rx) =
                 engine::socket::start_listener(my_pid).expect("failed to start agent socket");
 
-            // Bridge socket messages to the engine.
-            spawn_socket_bridge(socket_rx, engine_injector.clone());
+            // Bridge socket messages to the engine + child permission channel.
+            let (child_perm_tx, child_perm_rx) = tokio::sync::mpsc::unbounded_channel();
+            spawn_socket_bridge(socket_rx, engine_injector.clone(), child_perm_tx);
+            app.set_child_permission_rx(child_perm_rx);
 
             let my_agent_id = planned_agent_id
                 .clone()
@@ -688,6 +690,7 @@ fn redirect_stderr() {
 fn spawn_socket_bridge(
     mut socket_rx: tokio::sync::mpsc::UnboundedReceiver<engine::socket::IncomingMessage>,
     injector: engine::EventInjector,
+    child_perm_tx: tokio::sync::mpsc::UnboundedSender<engine::socket::IncomingMessage>,
 ) {
     tokio::spawn(async move {
         while let Some(msg) = socket_rx.recv().await {
@@ -703,6 +706,9 @@ fn spawn_socket_bridge(
                     let _ = reply_tx.send(
                         "agent is in interactive mode and cannot serve queries at this time".into(),
                     );
+                }
+                perm @ engine::socket::IncomingMessage::PermissionCheck { .. } => {
+                    let _ = child_perm_tx.send(perm);
                 }
             }
         }

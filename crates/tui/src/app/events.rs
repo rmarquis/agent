@@ -43,11 +43,7 @@ impl App {
                         self.screen.clear_dialog_area(d.anchor_row());
                         self.screen
                             .set_active_status(&ctx.call_id, ToolStatus::Pending);
-                        self.engine.send(UiCommand::PermissionDecision {
-                            request_id: ctx.request_id,
-                            approved: true,
-                            message: None,
-                        });
+                        self.send_permission_decision(ctx.request_id, true, None);
                     } else {
                         // Mode changed but still needs confirmation — keep dialog open.
                         self.confirm_context = Some(ctx);

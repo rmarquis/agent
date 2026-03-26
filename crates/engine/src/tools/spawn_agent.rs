@@ -92,8 +92,6 @@ impl Tool for SpawnAgentTool {
                 &child_depth.to_string(),
                 "--max-agents",
                 &self.max_agents.to_string(),
-                "--mode",
-                "yolo",
                 "--api-base",
                 &self.api_base,
                 "--api-key-env",

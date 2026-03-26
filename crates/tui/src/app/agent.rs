@@ -1,6 +1,26 @@
 use super::*;
 
 impl App {
+    /// Send a permission decision — either to a child agent (via socket reply)
+    /// or to the local engine. This is the single routing point for all
+    /// permission verdicts.
+    pub(super) fn send_permission_decision(
+        &mut self,
+        request_id: u64,
+        approved: bool,
+        message: Option<String>,
+    ) {
+        if let Some(reply_tx) = self.child_permission_replies.remove(&request_id) {
+            let _ = reply_tx.send(engine::socket::PermissionReply { approved, message });
+        } else {
+            self.engine.send(UiCommand::PermissionDecision {
+                request_id,
+                approved,
+                message,
+            });
+        }
+    }
+
     // ── Agent lifecycle ──────────────────────────────────────────────────
 
     pub(super) fn begin_agent_turn(&mut self, display: &str, content: Content) -> TurnState {
@@ -1013,11 +1033,7 @@ impl App {
         match choice {
             ConfirmChoice::Yes | ConfirmChoice::YesAutoApply => {
                 self.screen.set_active_status(call_id, ToolStatus::Pending);
-                self.engine.send(UiCommand::PermissionDecision {
-                    request_id,
-                    approved: true,
-                    message,
-                });
+                self.send_permission_decision(request_id, true, message);
                 if matches!(choice, ConfirmChoice::YesAutoApply) {
                     self.mode = Mode::Apply;
                     state::set_mode(self.mode);
@@ -1037,11 +1053,7 @@ impl App {
                     }
                 }
                 self.screen.set_active_status(call_id, ToolStatus::Pending);
-                self.engine.send(UiCommand::PermissionDecision {
-                    request_id,
-                    approved: true,
-                    message,
-                });
+                self.send_permission_decision(request_id, true, message);
                 false
             }
             ConfirmChoice::AlwaysPatterns(ref patterns, scope) => {
@@ -1066,11 +1078,7 @@ impl App {
                     }
                 }
                 self.screen.set_active_status(call_id, ToolStatus::Pending);
-                self.engine.send(UiCommand::PermissionDecision {
-                    request_id,
-                    approved: true,
-                    message,
-                });
+                self.send_permission_decision(request_id, true, message);
                 false
             }
             ConfirmChoice::AlwaysDir(ref dir, scope) => {
@@ -1085,20 +1093,12 @@ impl App {
                     }
                 }
                 self.screen.set_active_status(call_id, ToolStatus::Pending);
-                self.engine.send(UiCommand::PermissionDecision {
-                    request_id,
-                    approved: true,
-                    message,
-                });
+                self.send_permission_decision(request_id, true, message);
                 false
             }
             ConfirmChoice::No => {
                 let has_message = message.is_some();
-                self.engine.send(UiCommand::PermissionDecision {
-                    request_id,
-                    approved: false,
-                    message,
-                });
+                self.send_permission_decision(request_id, false, message);
                 self.screen
                     .finish_tool(call_id, ToolStatus::Denied, None, None);
                 if has_message {
@@ -1204,11 +1204,7 @@ impl App {
                                 .iter()
                                 .all(|sc| all_pats.clone().any(|p| p.matches(sc)))
                     } {
-                        self.engine.send(UiCommand::PermissionDecision {
-                            request_id: req.request_id,
-                            approved: true,
-                            message: None,
-                        });
+                        self.send_permission_decision(req.request_id, true, None);
                         return LoopAction::Continue;
                     }
                 }
@@ -1229,11 +1225,7 @@ impl App {
                         all_dirs.clone().any(|ad| dir.starts_with(ad))
                     })
                 {
-                    self.engine.send(UiCommand::PermissionDecision {
-                        request_id: req.request_id,
-                        approved: true,
-                        message: None,
-                    });
+                    self.send_permission_decision(req.request_id, true, None);
                     return LoopAction::Continue;
                 }
 

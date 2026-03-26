@@ -122,6 +122,10 @@ pub struct App {
     /// Monotonic counter to discard stale predictions.
     predict_generation: u64,
     sleep_inhibit: crate::sleep_inhibit::SleepInhibitor,
+    /// Receiver for child agent permission requests (fed by socket bridge).
+    child_permission_rx: tokio::sync::mpsc::UnboundedReceiver<engine::socket::IncomingMessage>,
+    /// Reply channels for pending child permission requests, keyed by synthetic request_id.
+    child_permission_replies: HashMap<u64, tokio::sync::oneshot::Sender<engine::socket::PermissionReply>>,
     pending_title: bool,
     last_width: u16,
     last_height: u16,
@@ -301,6 +305,38 @@ struct Timers {
 /// How long after the last keypress before we show a deferred permission dialog.
 const CONFIRM_DEFER_MS: u64 = 1500;
 
+/// Relay a permission check to a parent socket and return the result.
+async fn relay_permission(
+    parent_socket: Option<&std::path::Path>,
+    from_id: &str,
+    tool_name: &str,
+    args: &HashMap<String, serde_json::Value>,
+    confirm_message: &str,
+    approval_patterns: &[String],
+    summary: Option<&str>,
+) -> (bool, Option<String>) {
+    let Some(socket) = parent_socket else {
+        return (false, Some("no parent socket available".into()));
+    };
+    let req = engine::socket::PermissionCheckRequest {
+        from_id,
+        tool_name,
+        args,
+        confirm_message,
+        approval_patterns,
+        summary,
+    };
+    match engine::socket::send_permission_check(socket, &req).await {
+        Ok(reply) => (reply.approved, reply.message),
+        Err(e) => (false, Some(format!("permission relay failed: {e}"))),
+    }
+}
+
+/// Counter for synthetic request IDs assigned to child permission requests.
+/// Uses a high starting offset to avoid colliding with engine-generated IDs.
+static NEXT_CHILD_REQUEST_ID: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1_000_000_000);
+
 /// A permission dialog deferred because the user was actively typing.
 enum DeferredDialog {
     Confirm(ConfirmRequest),
@@ -445,6 +481,11 @@ impl App {
             input_prediction: None,
             predict_generation: 0,
             sleep_inhibit: crate::sleep_inhibit::SleepInhibitor::new(),
+            child_permission_rx: {
+                let (_, rx) = tokio::sync::mpsc::unbounded_channel();
+                rx
+            },
+            child_permission_replies: HashMap::new(),
             pending_title: false,
             last_width: terminal::size().map(|(w, _)| w).unwrap_or(80),
             last_height: terminal::size().map(|(_, h)| h).unwrap_or(24),
@@ -458,6 +499,14 @@ impl App {
     }
 
     // ── Unified event loop ───────────────────────────────────────────────
+
+    /// Set the receiver for child agent permission requests (from socket bridge).
+    pub fn set_child_permission_rx(
+        &mut self,
+        rx: tokio::sync::mpsc::UnboundedReceiver<engine::socket::IncomingMessage>,
+    ) {
+        self.child_permission_rx = rx;
+    }
 
     pub async fn run(
         &mut self,
@@ -679,6 +728,54 @@ impl App {
 
             // ── Drain subagent events ────────────────────────────────────
             self.drain_agent_events();
+
+            // ── Drain child permission requests ──────────────────────────
+            while let Ok(msg) = self.child_permission_rx.try_recv() {
+                let engine::socket::IncomingMessage::PermissionCheck {
+                    from_id, tool_name, args, confirm_message,
+                    approval_patterns, summary, reply_tx,
+                } = msg else { continue };
+
+                let request_id = NEXT_CHILD_REQUEST_ID
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.child_permission_replies
+                    .insert(request_id, reply_tx);
+
+                let agent_label = self
+                    .agents
+                    .iter()
+                    .find(|a| a.agent_id == from_id)
+                    .and_then(|a| a.slug.as_deref())
+                    .unwrap_or(&from_id);
+                let confirm_msg =
+                    format!("[agent: {}] {}", agent_label, confirm_message);
+
+                let ctrl = SessionControl::NeedsConfirm(ConfirmRequest {
+                    call_id: format!("child-perm-{request_id}"),
+                    tool_name,
+                    desc: confirm_msg,
+                    args,
+                    approval_patterns,
+                    outside_dir: None,
+                    summary,
+                    request_id,
+                });
+                let pending = agent.as_ref().map(|a| a.pending.as_slice()).unwrap_or(&[]);
+                let action = self.dispatch_control(
+                    ctrl,
+                    pending,
+                    &mut deferred_dialog,
+                    &mut active_dialog,
+                    t.last_keypress,
+                );
+                match action {
+                    LoopAction::Continue => {}
+                    LoopAction::Done => {
+                        self.finish_turn(false);
+                        agent = None;
+                    }
+                }
+            }
 
             // ── Show deferred dialog once user stops typing ──────────────
             // If agent was cancelled while a dialog was deferred, discard it.
@@ -1049,6 +1146,16 @@ impl App {
                                 }
                             }
                         }
+                        engine::socket::IncomingMessage::PermissionCheck {
+                            from_id, tool_name, args, confirm_message,
+                            approval_patterns, summary, reply_tx,
+                        } => {
+                            let (approved, message) = relay_permission(
+                                parent_socket.as_deref(), &from_id, &tool_name,
+                                &args, &confirm_message, &approval_patterns, summary.as_deref(),
+                            ).await;
+                            let _ = reply_tx.send(engine::socket::PermissionReply { approved, message });
+                        }
                     }
                 }
                 _ = &mut parent_check => {
@@ -1117,6 +1224,16 @@ impl App {
                             self.send_btw_query(question);
                             pending_query_tx = Some(reply_tx);
                         }
+                        engine::socket::IncomingMessage::PermissionCheck {
+                            from_id, tool_name, args, confirm_message,
+                            approval_patterns, summary, reply_tx,
+                        } => {
+                            let (approved, message) = relay_permission(
+                                parent_socket, &from_id, &tool_name,
+                                &args, &confirm_message, &approval_patterns, summary.as_deref(),
+                            ).await;
+                            let _ = reply_tx.send(engine::socket::PermissionReply { approved, message });
+                        }
                     }
                 }
                 _ = &mut parent_check => {
@@ -1135,12 +1252,16 @@ impl App {
 
                     // Handle side effects for events that need them.
                     match ev {
-                        EngineEvent::RequestPermission { request_id, .. } => {
-                            let approved = self.mode == Mode::Yolo;
+                        EngineEvent::RequestPermission {
+                            request_id, tool_name, args, confirm_message,
+                            approval_patterns, summary, ..
+                        } => {
+                            let (approved, message) = relay_permission(
+                                parent_socket, my_agent_id, &tool_name,
+                                &args, &confirm_message, &approval_patterns, summary.as_deref(),
+                            ).await;
                             self.engine.send(UiCommand::PermissionDecision {
-                                request_id,
-                                approved,
-                                message: None,
+                                request_id, approved, message,
                             });
                         }
                         EngineEvent::RequestAnswer { request_id, .. } => {
