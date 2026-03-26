@@ -682,13 +682,14 @@ impl App {
                     None => {
                         let text = items.join("\n");
                         if !text.is_empty() {
-                            self.screen.erase_prompt();
                             match self.process_input(&text) {
                                 InputOutcome::StartAgent => {
+                                    self.screen.erase_prompt();
                                     let content = Content::text(text.clone());
                                     agent = Some(self.begin_agent_turn(&text, content));
                                 }
                                 InputOutcome::Compact { focus } => {
+                                    self.screen.erase_prompt();
                                     if self.history.is_empty() {
                                         self.screen.notify_error("nothing to compact".into());
                                     } else {
@@ -696,18 +697,22 @@ impl App {
                                     }
                                 }
                                 InputOutcome::CustomCommand(cmd) => {
+                                    self.screen.erase_prompt();
                                     agent = Some(self.begin_custom_command_turn(*cmd));
                                 }
                                 InputOutcome::Exec(rx, kill) => {
+                                    self.screen.erase_prompt();
                                     self.exec_rx = Some(rx);
                                     self.exec_kill = Some(kill);
                                 }
                                 InputOutcome::CancelAndClear => {
+                                    self.screen.erase_prompt();
                                     self.reset_session();
                                     agent = None;
                                 }
                                 InputOutcome::Continue | InputOutcome::Quit => {}
                                 InputOutcome::OpenDialog(dlg) => {
+                                    self.screen.erase_prompt();
                                     active_dialog = Some(dlg);
                                 }
                             }

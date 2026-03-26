@@ -185,7 +185,6 @@ impl App {
                     let text = content.text_content();
                     let has_images = content.image_count() > 0;
                     if !text.is_empty() || has_images {
-                        self.screen.erase_prompt();
                         let outcome = if has_images && text.trim().is_empty() {
                             InputOutcome::StartAgent
                         } else {
@@ -193,12 +192,15 @@ impl App {
                         };
                         match outcome {
                             InputOutcome::StartAgent => {
+                                self.screen.erase_prompt();
                                 *agent = Some(self.begin_agent_turn(&display, content));
                             }
                             InputOutcome::CustomCommand(cmd) => {
+                                self.screen.erase_prompt();
                                 *agent = Some(self.begin_custom_command_turn(*cmd));
                             }
                             InputOutcome::Compact { focus } => {
+                                self.screen.erase_prompt();
                                 if self.history.is_empty() {
                                     self.screen.notify_error("nothing to compact".into());
                                 } else {
@@ -206,16 +208,19 @@ impl App {
                                 }
                             }
                             InputOutcome::Exec(rx, kill) => {
+                                self.screen.erase_prompt();
                                 self.exec_rx = Some(rx);
                                 self.exec_kill = Some(kill);
                             }
                             InputOutcome::CancelAndClear => {
+                                self.screen.erase_prompt();
                                 self.reset_session();
                                 *agent = None;
                             }
                             InputOutcome::Continue => {}
                             InputOutcome::Quit => return true,
                             InputOutcome::OpenDialog(dlg) => {
+                                self.screen.erase_prompt();
                                 *active_dialog = Some(dlg);
                             }
                         }

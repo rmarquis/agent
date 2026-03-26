@@ -138,7 +138,9 @@ pub(super) const SPINNER_FRAMES: &[&str] = &["✿", "❀", "✾", "❁"];
 /// A markdown table separator line (e.g. `|---|---|`).
 pub(super) fn is_table_separator(line: &str) -> bool {
     let t = line.trim();
-    !t.is_empty() && t.chars().all(|c| c == '-' || c == '|' || c == ':' || c == ' ')
+    !t.is_empty()
+        && t.chars()
+            .all(|c| c == '-' || c == '|' || c == ':' || c == ' ')
 }
 
 /// Context for rendering content inside a bordered box.
@@ -1091,9 +1093,7 @@ impl Screen {
                 at.in_code_block = None;
             }
             // If current_line is a table row, add it to the table.
-            if !at.current_line.is_empty()
-                && at.current_line.trim_start().starts_with('|')
-            {
+            if !at.current_line.is_empty() && at.current_line.trim_start().starts_with('|') {
                 at.table_rows.push(std::mem::take(&mut at.current_line));
             }
             Self::commit_table(&mut self.history, &mut at);
@@ -1769,15 +1769,18 @@ impl Screen {
 
         // Current text overlay.
         if let Some(ref at) = self.active_text {
-            let in_table = !at.table_rows.is_empty()
-                || at.current_line.trim_start().starts_with('|');
+            let in_table =
+                !at.table_rows.is_empty() || at.current_line.trim_start().starts_with('|');
 
             if in_table {
                 let n = at.table_data_rows;
                 let dot_count = (std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
-                    .subsec_millis() / 333) as usize % 3 + 1;
+                    .subsec_millis()
+                    / 333) as usize
+                    % 3
+                    + 1;
                 let dots = &"..."[..dot_count];
                 overlay_blocks.push(Block::Hint {
                     content: format!(" building table ({n} rows){dots}"),

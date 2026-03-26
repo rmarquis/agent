@@ -1040,7 +1040,11 @@ impl<'a> Turn<'a> {
     async fn call_llm(
         &mut self,
         tool_defs: &[ToolDefinition],
-    ) -> (Result<(crate::provider::LLMResponse, bool), ProviderError>, String, String) {
+    ) -> (
+        Result<(crate::provider::LLMResponse, bool), ProviderError>,
+        String,
+        String,
+    ) {
         // The chat future borrows self.provider and self.model, so model
         // changes received mid-request are deferred until the future resolves.
         let mut pending_model: Option<(String, String, String, String)> = None;
