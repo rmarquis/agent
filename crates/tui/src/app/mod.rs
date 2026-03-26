@@ -732,8 +732,8 @@ impl App {
             // ── Drain child permission requests ──────────────────────────
             while let Ok(msg) = self.child_permission_rx.try_recv() {
                 let engine::socket::IncomingMessage::PermissionCheck {
-                    from_id, tool_name, args, confirm_message,
-                    approval_patterns, summary, reply_tx,
+                    tool_name, args, confirm_message,
+                    approval_patterns, summary, reply_tx, ..
                 } = msg else { continue };
 
                 let request_id = NEXT_CHILD_REQUEST_ID
@@ -741,19 +741,10 @@ impl App {
                 self.child_permission_replies
                     .insert(request_id, reply_tx);
 
-                let agent_label = self
-                    .agents
-                    .iter()
-                    .find(|a| a.agent_id == from_id)
-                    .and_then(|a| a.slug.as_deref())
-                    .unwrap_or(&from_id);
-                let confirm_msg =
-                    format!("[agent: {}] {}", agent_label, confirm_message);
-
                 let ctrl = SessionControl::NeedsConfirm(ConfirmRequest {
                     call_id: format!("child-perm-{request_id}"),
                     tool_name,
-                    desc: confirm_msg,
+                    desc: confirm_message,
                     args,
                     approval_patterns,
                     outside_dir: None,
