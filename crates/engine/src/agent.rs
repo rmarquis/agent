@@ -787,22 +787,6 @@ impl<'a> Turn<'a> {
                             None,
                         );
                     }
-                    Decision::Ask
-                        if self.mode == Mode::Yolo
-                            && self.permissions.was_downgraded(
-                                self.mode,
-                                &tc.function.name,
-                                &args,
-                            ) =>
-                    {
-                        self.push_tool_result(
-                            &tc.id,
-                            "This operation targets a path outside the workspace. \
-                             Workspace restriction cannot be overridden.",
-                            false,
-                            None,
-                        );
-                    }
                     Decision::Ask => {
                         let desc = tool
                             .needs_confirm(&args)
