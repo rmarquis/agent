@@ -23,7 +23,7 @@ use crossterm::{
     },
     terminal, ExecutableCommand,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -573,7 +573,7 @@ impl App {
             last_ctrlc: None,
             last_keypress: None,
         };
-        let mut deferred_dialog: Option<DeferredDialog> = None;
+        let mut pending_dialogs: VecDeque<DeferredDialog> = VecDeque::new();
 
         'main: loop {
             // ── Background polls ─────────────────────────────────────────
@@ -616,7 +616,7 @@ impl App {
                         self.dispatch_control(
                             ctrl,
                             &ag.pending,
-                            &mut deferred_dialog,
+                            &mut pending_dialogs,
                             &mut active_dialog,
                             t.last_keypress,
                         )
@@ -768,7 +768,7 @@ impl App {
                 let action = self.dispatch_control(
                     ctrl,
                     pending,
-                    &mut deferred_dialog,
+                    &mut pending_dialogs,
                     &mut active_dialog,
                     t.last_keypress,
                 );
@@ -781,42 +781,49 @@ impl App {
                 }
             }
 
-            // ── Show deferred dialog once user stops typing ──────────────
-            // If agent was cancelled while a dialog was deferred, discard it.
-            if agent.is_none() && deferred_dialog.is_some() {
-                deferred_dialog.take();
+            // ── Process pending permission dialogs ──────────────────────
+            // If agent was cancelled while dialogs were pending, discard them.
+            if agent.is_none() && !pending_dialogs.is_empty() {
+                pending_dialogs.clear();
                 self.screen.set_pending_dialog(false);
             }
-            if deferred_dialog.is_some() && active_dialog.is_none() && agent.is_some() {
+            // Re-dispatch queued dialogs.  Each goes through dispatch_control
+            // so auto-approval checks re-run ("always allow" → auto-approve rest).
+            if !pending_dialogs.is_empty() && active_dialog.is_none() && agent.is_some() {
                 let idle = t
                     .last_keypress
                     .map(|lk| lk.elapsed() >= Duration::from_millis(CONFIRM_DEFER_MS))
                     .unwrap_or(true);
-                if idle && deferred_dialog.is_some() {
-                    self.screen.set_pending_dialog(false);
-                    let deferred = deferred_dialog.take().unwrap();
-                    match deferred {
-                        DeferredDialog::Confirm(req) => {
-                            self.confirm_context = Some(ConfirmContext {
-                                call_id: req.call_id.clone(),
-                                tool_name: req.tool_name.clone(),
-                                args: req.args.clone(),
-                                request_id: req.request_id,
-                            });
-                            self.screen
-                                .set_active_status(&req.call_id, ToolStatus::Confirm);
-                            let dialog =
-                                Box::new(ConfirmDialog::new(&req, self.input.vim_enabled()));
-                            self.open_blocking_dialog(dialog, &mut active_dialog);
-                        }
+                while idle
+                    && !pending_dialogs.is_empty()
+                    && active_dialog.is_none()
+                    && agent.is_some()
+                {
+                    let deferred = pending_dialogs.pop_front().unwrap();
+                    let ctrl = match deferred {
+                        DeferredDialog::Confirm(req) => SessionControl::NeedsConfirm(req),
                         DeferredDialog::AskQuestion { args, request_id } => {
-                            self.screen.set_active_status("", ToolStatus::Confirm);
-                            let questions = render::parse_questions(&args);
-                            let dialog = Box::new(QuestionDialog::new(questions, request_id));
-                            self.open_blocking_dialog(dialog, &mut active_dialog);
+                            SessionControl::NeedsAskQuestion { args, request_id }
+                        }
+                    };
+                    let pending = agent.as_ref().map(|a| a.pending.as_slice()).unwrap_or(&[]);
+                    let action = self.dispatch_control(
+                        ctrl,
+                        pending,
+                        &mut pending_dialogs,
+                        &mut active_dialog,
+                        t.last_keypress,
+                    );
+                    match action {
+                        LoopAction::Continue => {}
+                        LoopAction::Done => {
+                            self.finish_turn(false);
+                            agent = None;
                         }
                     }
                 }
+                self.screen
+                    .set_pending_dialog(!pending_dialogs.is_empty());
             }
 
             // ── Render ───────────────────────────────────────────────────
@@ -870,7 +877,7 @@ impl App {
                         let action = self.dispatch_control(
                             ctrl,
                             &ag.pending,
-                            &mut deferred_dialog,
+                            &mut pending_dialogs,
                             &mut active_dialog,
                             t.last_keypress,
                         );

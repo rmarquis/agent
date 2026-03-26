@@ -1214,28 +1214,32 @@ impl App {
         &mut self,
         ctrl: SessionControl,
         pending: &[PendingTool],
-        deferred_dialog: &mut Option<DeferredDialog>,
+        pending_dialogs: &mut VecDeque<DeferredDialog>,
         active_dialog: &mut Option<Box<dyn render::Dialog>>,
         last_keypress: Option<Instant>,
     ) -> LoopAction {
+        // Queue dialogs when a blocking dialog is active or the user is typing.
+        // The queue is drained in the main loop via re-dispatch, so auto-approval
+        // checks re-run (handles "always allow" → recheck).
+        let should_queue = active_dialog
+            .as_ref()
+            .is_some_and(|d| d.blocks_agent())
+            || (last_keypress
+                .is_some_and(|t| t.elapsed() < Duration::from_millis(CONFIRM_DEFER_MS))
+                && !self.input.buf.is_empty());
+
         match ctrl {
             SessionControl::Continue => LoopAction::Continue,
             SessionControl::Done => LoopAction::Done,
             SessionControl::NeedsConfirm(mut req) => {
                 if req.tool_name.is_empty() {
-                    // Invariant: permission checks run sequentially in the
-                    // engine's Phase 1, so the most recently pushed pending
-                    // tool is always the one awaiting permission.
                     req.tool_name = pending.last().map(|p| p.name.clone()).unwrap_or_default();
                 }
 
                 // Check auto-approvals (doesn't need UI).
-                // Split compound commands into sub-commands and check each
-                // individually against the stored patterns.
                 let session_pats = self.session_approved.get(&req.tool_name);
                 let workspace_pats = self.workspace_approved.get(&req.tool_name);
                 if session_pats.is_some() || workspace_pats.is_some() {
-                    // Empty vec means "allow all" for that tool.
                     let blanket = session_pats.is_some_and(|p| p.is_empty())
                         || workspace_pats.is_some_and(|p| p.is_empty());
                     if blanket || {
@@ -1271,15 +1275,28 @@ impl App {
                     return LoopAction::Continue;
                 }
 
-                // Determine the outside-dir option for the "always allow" button.
+                // Auto-approval didn't match — queue if we can't show a dialog now.
+                if should_queue {
+                    self.screen
+                        .set_active_status(&req.call_id, ToolStatus::Confirm);
+                    self.screen.set_pending_dialog(true);
+                    pending_dialogs.push_back(DeferredDialog::Confirm(req));
+                    return LoopAction::Continue;
+                }
+
+                // Prepare dialog options.
                 let downgraded =
                     self.permissions
                         .was_downgraded(self.mode, &req.tool_name, &req.args);
                 req.outside_dir = if !outside_paths.is_empty() {
-                    let dir = std::path::Path::new(&outside_paths[0])
-                        .parent()
-                        .unwrap_or(std::path::Path::new(&outside_paths[0]))
-                        .to_path_buf();
+                    let path = std::path::Path::new(&outside_paths[0]);
+                    let dir = if path.is_dir() {
+                        path.to_path_buf()
+                    } else {
+                        path.parent()
+                            .unwrap_or(path)
+                            .to_path_buf()
+                    };
                     if downgraded || self.seen_outside_dirs.contains(&dir) {
                         self.seen_outside_dirs.insert(dir.clone());
                         Some(dir)
@@ -1291,7 +1308,6 @@ impl App {
                     None
                 };
 
-                // Strip patterns the user already approved (session or workspace).
                 if !req.approval_patterns.is_empty() {
                     let approved: Vec<&glob::Pattern> = self
                         .session_approved
@@ -1302,17 +1318,6 @@ impl App {
                         .collect();
                     req.approval_patterns
                         .retain(|p| !approved.iter().any(|g| g.as_str() == p));
-                }
-
-                // If the user is actively typing, defer the dialog.
-                let recently_typed = last_keypress
-                    .is_some_and(|t| t.elapsed() < Duration::from_millis(CONFIRM_DEFER_MS));
-                if recently_typed && !self.input.buf.is_empty() {
-                    self.screen
-                        .set_active_status(&req.call_id, ToolStatus::Confirm);
-                    self.screen.set_pending_dialog(true);
-                    *deferred_dialog = Some(DeferredDialog::Confirm(req));
-                    return LoopAction::Continue;
                 }
 
                 // Close any non-blocking dialog (e.g. Ps) to make room.
@@ -1332,12 +1337,9 @@ impl App {
                 LoopAction::Continue
             }
             SessionControl::NeedsAskQuestion { args, request_id } => {
-                // If the user is actively typing, defer the dialog.
-                let recently_typed = last_keypress
-                    .is_some_and(|t| t.elapsed() < Duration::from_millis(CONFIRM_DEFER_MS));
-                if recently_typed && !self.input.buf.is_empty() {
+                if should_queue {
                     self.screen.set_pending_dialog(true);
-                    *deferred_dialog = Some(DeferredDialog::AskQuestion { args, request_id });
+                    pending_dialogs.push_back(DeferredDialog::AskQuestion { args, request_id });
                     return LoopAction::Continue;
                 }
 
