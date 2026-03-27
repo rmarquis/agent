@@ -143,6 +143,10 @@ pub struct App {
     turn_metas: Vec<(usize, protocol::TurnMeta)>,
     /// TurnMeta from the engine, consumed by `finish_turn`.
     pending_turn_meta: Option<protocol::TurnMeta>,
+    /// Accumulated cost for the current session in USD.
+    pub session_cost_usd: f64,
+    /// Active model config (for pricing lookups).
+    pub model_config: engine::ModelConfig,
 }
 
 /// Retained subset of the confirm request for mode-toggle re-checks.
@@ -496,6 +500,8 @@ impl App {
             token_snapshots: Vec::new(),
             turn_metas: Vec::new(),
             pending_turn_meta: None,
+            session_cost_usd: 0.0,
+            model_config: engine::ModelConfig::default(),
         }
     }
 

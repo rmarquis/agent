@@ -494,6 +494,7 @@ pub struct Screen {
     prompt: PromptState,
     working: WorkingState,
     context_tokens: Option<u32>,
+    session_cost_usd: f64,
     model_label: Option<String>,
     reasoning_effort: protocol::ReasoningEffort,
     /// True once terminal auto-scrolling has pushed content into scrollback.
@@ -570,6 +571,7 @@ impl Screen {
             prompt: PromptState::new(),
             working: WorkingState::new(),
             context_tokens: None,
+            session_cost_usd: 0.0,
             model_label: None,
             reasoning_effort: Default::default(),
             has_scrollback: false,
@@ -1343,6 +1345,11 @@ impl Screen {
         self.context_tokens
     }
 
+    pub fn set_session_cost(&mut self, usd: f64) {
+        self.session_cost_usd = usd;
+        self.prompt.dirty = true;
+    }
+
     pub fn set_model_label(&mut self, label: String) {
         self.model_label = Some(label);
         self.prompt.dirty = true;
@@ -1621,6 +1628,7 @@ impl Screen {
         self.prompt.anchor_row = Some(0);
         self.working.clear();
         self.context_tokens = None;
+        self.session_cost_usd = 0.0;
         self.task_label = None;
         self.has_scrollback = false;
         self.content_start_row = None;
@@ -2123,6 +2131,24 @@ impl Screen {
             }
             right_spans.push(BarSpan {
                 text: format!(" {}", format_tokens(tokens)),
+                color: theme::muted(),
+                bg: None,
+                attr: None,
+                priority: 1,
+            });
+        }
+        if self.session_cost_usd > 0.0 {
+            if !right_spans.is_empty() {
+                right_spans.push(BarSpan {
+                    text: " ·".into(),
+                    color: bar_color,
+                    bg: None,
+                    attr: None,
+                    priority: 2,
+                });
+            }
+            right_spans.push(BarSpan {
+                text: format!(" {}", engine::pricing::format_cost(self.session_cost_usd)),
                 color: theme::muted(),
                 bg: None,
                 attr: None,

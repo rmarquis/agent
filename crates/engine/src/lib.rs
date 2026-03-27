@@ -7,6 +7,7 @@ pub mod mcp;
 pub mod paths;
 pub mod permissions;
 pub mod plan;
+pub mod pricing;
 pub mod provider;
 pub mod registry;
 pub mod skills;

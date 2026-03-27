@@ -243,6 +243,9 @@ pub enum EngineEvent {
     TokenUsage {
         prompt_tokens: u32,
         completion_tokens: Option<u32>,
+        cache_read_tokens: Option<u32>,
+        cache_write_tokens: Option<u32>,
+        reasoning_tokens: Option<u32>,
         tokens_per_sec: Option<f64>,
     },
 

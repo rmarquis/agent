@@ -64,6 +64,8 @@ impl App {
         self.engine.processes.clear();
         self.reset_subagents_for_new_session();
         self.session = session::Session::new();
+        self.session_cost_usd = 0.0;
+        self.screen.set_session_cost(0.0);
         self.pending_title = false;
         self.compact_epoch += 1;
         if let Ok(mut guard) = self.shared_session.lock() {

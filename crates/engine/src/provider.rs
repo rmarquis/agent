@@ -41,14 +41,18 @@ impl ToolDefinition {
     }
 }
 
-/// Parsed fields from an API response: (content, reasoning, tool_calls, prompt_tokens, completion_tokens).
-type ParsedResponse = (
-    Option<String>,
-    Option<String>,
-    Vec<ToolCall>,
-    Option<u32>,
-    Option<u32>,
-);
+/// Parsed token usage from an API response.
+#[derive(Debug, Default, Clone)]
+pub struct TokenUsage {
+    pub prompt_tokens: Option<u32>,
+    pub completion_tokens: Option<u32>,
+    pub cache_read_tokens: Option<u32>,
+    pub cache_write_tokens: Option<u32>,
+    pub reasoning_tokens: Option<u32>,
+}
+
+/// Parsed fields from an API response.
+type ParsedResponse = (Option<String>, Option<String>, Vec<ToolCall>, TokenUsage);
 
 /// A streaming delta from the LLM.
 pub enum StreamDelta<'a> {
@@ -60,8 +64,7 @@ pub struct LLMResponse {
     pub content: Option<String>,
     pub reasoning_content: Option<String>,
     pub tool_calls: Vec<ToolCall>,
-    pub prompt_tokens: Option<u32>,
-    pub completion_tokens: Option<u32>,
+    pub usage: TokenUsage,
     pub tokens_per_sec: Option<f64>,
 }
 
@@ -491,10 +494,10 @@ impl Provider {
                 }
             };
 
-            let (content, reasoning_content, tool_calls, prompt_tokens, completion_tokens) = parsed;
+            let (content, reasoning_content, tool_calls, usage) = parsed;
 
             let elapsed = request_start.elapsed();
-            let tokens_per_sec = completion_tokens.and_then(|c| {
+            let tokens_per_sec = usage.completion_tokens.and_then(|c| {
                 if c > 0 && elapsed.as_secs_f64() >= 0.001 {
                     Some(c as f64 / elapsed.as_secs_f64())
                 } else {
@@ -509,7 +512,7 @@ impl Provider {
                     "content": content,
                     "reasoning_content": reasoning_content,
                     "tool_calls": tool_calls,
-                    "prompt_tokens": prompt_tokens,
+                    "prompt_tokens": usage.prompt_tokens,
                 }),
             );
 
@@ -517,8 +520,7 @@ impl Provider {
                 content,
                 reasoning_content,
                 tool_calls,
-                prompt_tokens,
-                completion_tokens,
+                usage,
                 tokens_per_sec,
             });
         }
@@ -538,8 +540,7 @@ impl Provider {
         let mut content = String::new();
         let mut reasoning_content = String::new();
         let mut tool_calls: HashMap<usize, (String, String, String)> = HashMap::new(); // idx -> (id, name, args)
-        let mut prompt_tokens: Option<u32> = None;
-        let mut completion_tokens: Option<u32> = None;
+        let mut usage = TokenUsage::default();
         let mut sse_buf = String::new();
 
         let mut stream = resp.bytes_stream();
@@ -575,10 +576,17 @@ impl Provider {
                 };
 
                 // Extract usage from the final chunk
-                if let Some(usage) = ev.get("usage") {
-                    prompt_tokens = usage["prompt_tokens"].as_u64().map(|n| n as u32);
-                    completion_tokens =
-                        completion_tokens.or(usage["completion_tokens"].as_u64().map(|n| n as u32));
+                if let Some(u) = ev.get("usage") {
+                    usage.prompt_tokens = u["prompt_tokens"].as_u64().map(|n| n as u32);
+                    usage.completion_tokens = usage
+                        .completion_tokens
+                        .or(u["completion_tokens"].as_u64().map(|n| n as u32));
+                    usage.cache_read_tokens = u["prompt_tokens_details"]["cached_tokens"]
+                        .as_u64()
+                        .map(|n| n as u32);
+                    usage.reasoning_tokens = u["completion_tokens_details"]["reasoning_tokens"]
+                        .as_u64()
+                        .map(|n| n as u32);
                 }
 
                 let delta = match ev["choices"].get(0).and_then(|c| c.get("delta")) {
@@ -660,23 +668,11 @@ impl Provider {
             if !from_content.is_empty() || !from_reasoning.is_empty() {
                 let tool_calls: Vec<ToolCall> =
                     from_content.into_iter().chain(from_reasoning).collect();
-                return Ok((
-                    cleaned_content,
-                    cleaned_reasoning,
-                    tool_calls,
-                    prompt_tokens,
-                    completion_tokens,
-                ));
+                return Ok((cleaned_content, cleaned_reasoning, tool_calls, usage));
             }
         }
 
-        Ok((
-            content,
-            reasoning,
-            tool_calls,
-            prompt_tokens,
-            completion_tokens,
-        ))
+        Ok((content, reasoning, tool_calls, usage))
     }
 
     /// Read an SSE stream from the OpenAI Responses API and accumulate the response.
@@ -690,8 +686,7 @@ impl Provider {
         let mut reasoning_content = String::new();
         // Map from item_id to (id, call_id, name, args)
         let mut tool_calls: HashMap<String, (String, String, String, String)> = HashMap::new();
-        let mut prompt_tokens: Option<u32> = None;
-        let mut completion_tokens: Option<u32> = None;
+        let mut usage = TokenUsage::default();
         let mut sse_buf = String::new();
 
         let mut stream = resp.bytes_stream();
@@ -776,9 +771,15 @@ impl Provider {
                         }
                     }
                     "response.completed" | "response.done" => {
-                        if let Some(usage) = ev.get("response").and_then(|r| r.get("usage")) {
-                            prompt_tokens = usage["input_tokens"].as_u64().map(|n| n as u32);
-                            completion_tokens = usage["output_tokens"].as_u64().map(|n| n as u32);
+                        if let Some(u) = ev.get("response").and_then(|r| r.get("usage")) {
+                            usage.prompt_tokens = u["input_tokens"].as_u64().map(|n| n as u32);
+                            usage.completion_tokens = u["output_tokens"].as_u64().map(|n| n as u32);
+                            usage.cache_read_tokens = u["input_tokens_details"]["cached_tokens"]
+                                .as_u64()
+                                .map(|n| n as u32);
+                            usage.reasoning_tokens = u["output_tokens_details"]["reasoning_tokens"]
+                                .as_u64()
+                                .map(|n| n as u32);
                         }
                     }
                     _ => {}
@@ -812,13 +813,7 @@ impl Provider {
             })
             .collect();
 
-        Ok((
-            content,
-            reasoning,
-            tool_calls,
-            prompt_tokens,
-            completion_tokens,
-        ))
+        Ok((content, reasoning, tool_calls, usage))
     }
 
     /// Read an SSE stream from the Anthropic Messages API and accumulate the response.
@@ -831,8 +826,7 @@ impl Provider {
         let mut content = String::new();
         let mut reasoning_content = String::new();
         let mut tool_calls: HashMap<usize, (String, String, String)> = HashMap::new(); // idx -> (id, name, args)
-        let mut prompt_tokens: Option<u32> = None;
-        let mut completion_tokens: Option<u32> = None;
+        let mut usage = TokenUsage::default();
         let mut sse_buf = String::new();
 
         let mut stream = resp.bytes_stream();
@@ -869,6 +863,28 @@ impl Provider {
                 let event_type = ev["type"].as_str().unwrap_or("");
 
                 match event_type {
+                    "message_start" => {
+                        // Anthropic sends input token counts (including cache) in message_start.
+                        if let Some(u) = ev.get("message").and_then(|m| m.get("usage")) {
+                            usage.prompt_tokens = u["input_tokens"].as_u64().map(|n| n as u32);
+                            usage.cache_read_tokens =
+                                u["cache_read_input_tokens"].as_u64().map(|n| n as u32);
+                            usage.cache_write_tokens = u["cache_creation_input_tokens"]
+                                .as_u64()
+                                .map(|n| n as u32)
+                                .or_else(|| {
+                                    // Newer format with ephemeral durations.
+                                    let cc = u.get("cache_creation")?;
+                                    let a = cc["ephemeral_5m_input_tokens"].as_u64().unwrap_or(0);
+                                    let b = cc["ephemeral_1h_input_tokens"].as_u64().unwrap_or(0);
+                                    if a + b > 0 {
+                                        Some((a + b) as u32)
+                                    } else {
+                                        None
+                                    }
+                                });
+                        }
+                    }
                     "content_block_start" => {
                         if let Some(idx) = ev["index"].as_u64() {
                             if let Some(cb) = ev.get("content_block") {
@@ -909,9 +925,13 @@ impl Provider {
                         }
                     }
                     "message_delta" => {
-                        if let Some(usage) = ev.get("usage") {
-                            prompt_tokens = usage["input_tokens"].as_u64().map(|n| n as u32);
-                            completion_tokens = usage["output_tokens"].as_u64().map(|n| n as u32);
+                        if let Some(u) = ev.get("usage") {
+                            // message_delta carries output_tokens.
+                            usage.completion_tokens = u["output_tokens"].as_u64().map(|n| n as u32);
+                            // input_tokens may be re-sent here; prefer message_start value.
+                            if usage.prompt_tokens.is_none() {
+                                usage.prompt_tokens = u["input_tokens"].as_u64().map(|n| n as u32);
+                            }
                         }
                     }
                     _ => {}
@@ -948,13 +968,7 @@ impl Provider {
         tc_vec.sort_by_key(|(idx, _)| *idx);
         let tool_calls: Vec<ToolCall> = tc_vec.into_iter().map(|(_, tc)| tc).collect();
 
-        Ok((
-            content,
-            reasoning,
-            tool_calls,
-            prompt_tokens,
-            completion_tokens,
-        ))
+        Ok((content, reasoning, tool_calls, usage))
     }
 
     // ── Request body builders ───────────────────────────────────────────
@@ -1334,17 +1348,28 @@ impl Provider {
             }
         }
 
-        // Extract usage.
-        let prompt_tokens = data["usage"]["input_tokens"].as_u64().map(|n| n as u32);
-        let completion_tokens = data["usage"]["output_tokens"].as_u64().map(|n| n as u32);
+        let u = &data["usage"];
+        let usage = TokenUsage {
+            prompt_tokens: u["input_tokens"].as_u64().map(|n| n as u32),
+            completion_tokens: u["output_tokens"].as_u64().map(|n| n as u32),
+            cache_read_tokens: u["cache_read_input_tokens"].as_u64().map(|n| n as u32),
+            cache_write_tokens: u["cache_creation_input_tokens"]
+                .as_u64()
+                .map(|n| n as u32)
+                .or_else(|| {
+                    let cc = u.get("cache_creation")?;
+                    let a = cc["ephemeral_5m_input_tokens"].as_u64().unwrap_or(0);
+                    let b = cc["ephemeral_1h_input_tokens"].as_u64().unwrap_or(0);
+                    if a + b > 0 {
+                        Some((a + b) as u32)
+                    } else {
+                        None
+                    }
+                }),
+            reasoning_tokens: None,
+        };
 
-        Ok((
-            content,
-            reasoning_content,
-            tool_calls,
-            prompt_tokens,
-            completion_tokens,
-        ))
+        Ok((content, reasoning_content, tool_calls, usage))
     }
 
     /// Parse a Chat Completions API response.
@@ -1380,18 +1405,20 @@ impl Provider {
             }
         }
 
-        let prompt_tokens = data["usage"]["prompt_tokens"].as_u64().map(|n| n as u32);
-        let completion_tokens = data["usage"]["completion_tokens"]
-            .as_u64()
-            .map(|n| n as u32);
+        let u = &data["usage"];
+        let usage = TokenUsage {
+            prompt_tokens: u["prompt_tokens"].as_u64().map(|n| n as u32),
+            completion_tokens: u["completion_tokens"].as_u64().map(|n| n as u32),
+            cache_read_tokens: u["prompt_tokens_details"]["cached_tokens"]
+                .as_u64()
+                .map(|n| n as u32),
+            cache_write_tokens: None,
+            reasoning_tokens: u["completion_tokens_details"]["reasoning_tokens"]
+                .as_u64()
+                .map(|n| n as u32),
+        };
 
-        Ok((
-            content,
-            reasoning_content,
-            tool_calls,
-            prompt_tokens,
-            completion_tokens,
-        ))
+        Ok((content, reasoning_content, tool_calls, usage))
     }
 
     /// Parse an OpenAI Responses API response.
@@ -1445,16 +1472,20 @@ impl Provider {
             }
         }
 
-        let prompt_tokens = data["usage"]["input_tokens"].as_u64().map(|n| n as u32);
-        let completion_tokens = data["usage"]["output_tokens"].as_u64().map(|n| n as u32);
+        let u = &data["usage"];
+        let usage = TokenUsage {
+            prompt_tokens: u["input_tokens"].as_u64().map(|n| n as u32),
+            completion_tokens: u["output_tokens"].as_u64().map(|n| n as u32),
+            cache_read_tokens: u["input_tokens_details"]["cached_tokens"]
+                .as_u64()
+                .map(|n| n as u32),
+            cache_write_tokens: None,
+            reasoning_tokens: u["output_tokens_details"]["reasoning_tokens"]
+                .as_u64()
+                .map(|n| n as u32),
+        };
 
-        Ok((
-            content,
-            reasoning_content,
-            tool_calls,
-            prompt_tokens,
-            completion_tokens,
-        ))
+        Ok((content, reasoning_content, tool_calls, usage))
     }
 
     /// Fetch the context window size for `model` from the /v1/models endpoint.

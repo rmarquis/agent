@@ -137,7 +137,21 @@ models:
     min_p: 0.01                # openai-compatible only
     repeat_penalty: 1.0        # openai-compatible only
     tool_calling: false         # disable tools for this model
+  - name: custom-model
+    input_cost: 2.0            # $/1M input tokens
+    output_cost: 8.0           # $/1M output tokens
+    cache_read_cost: 0.5       # $/1M cache-read tokens
+    cache_write_cost: 0.0      # $/1M cache-write tokens
 ```
+
+#### Pricing
+
+Cost tracking is built in for popular models (Claude, GPT, Gemini, DeepSeek).
+The session cost is shown in the status bar and total cost appears in `/stats`.
+
+For models not in the built-in table, or to override built-in prices, set cost
+fields on the model config. All values are USD per 1 million tokens. Unknown
+models default to zero cost.
 
 ## Defaults
 

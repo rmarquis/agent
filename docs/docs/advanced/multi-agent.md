@@ -58,32 +58,10 @@ Other interactive agent sessions in the same repository are automatically
 discovered via the registry at `~/.local/state/agent/registry/`. You can
 communicate with peers using the same `message_agent` and `peek_agent` tools.
 
-## Tab Bar
+## Managing Subagents
 
-Each subagent gets its own tab with full TUI rendering. The tab bar appears at
-the bottom of the screen.
+Use `/agents` to open a dialog listing all running subagents with their status
+and task. From the parent session you can also use `stop_agent` via the model to
+terminate a subagent, or `message_agent` / `peek_agent` to interact with it.
 
-### Switching Tabs
-
-| Key | Action |
-| --- | --- |
-| `Left` / `Right` | Cycle tabs (when input is empty) |
-| `Alt+[` / `Alt+]` | Cycle tabs (always) |
-| `Alt+1`..`Alt+9` | Jump to tab by number |
-| `gt` / `gT` | Next / previous tab (vim normal mode) |
-
-### Subagent Commands
-
-These slash commands work on subagent tabs:
-
-| Command | Action |
-| --- | --- |
-| `/exit` | Kill the subagent |
-| `/export` | Copy conversation to clipboard |
-| `/color` | Set slug color |
-| `/stats` | Show metrics |
-| `/agents` | Manage agents |
-| `/btw` | Side question |
-| `!cmd` | Shell escape |
-
-All other commands are parent-only.
+The status line shows the number of active subagents when any are running.

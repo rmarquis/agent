@@ -343,6 +343,9 @@ impl App {
             EngineEvent::TokenUsage {
                 prompt_tokens,
                 completion_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+                reasoning_tokens,
                 tokens_per_sec,
             } => {
                 if prompt_tokens > 0 {
@@ -352,6 +355,17 @@ impl App {
                 if let Some(tps) = tokens_per_sec {
                     self.screen.record_tokens_per_sec(tps);
                 }
+                let usage = engine::provider::TokenUsage {
+                    prompt_tokens: Some(prompt_tokens),
+                    completion_tokens,
+                    cache_read_tokens,
+                    cache_write_tokens,
+                    reasoning_tokens,
+                };
+                let pricing = engine::pricing::resolve(&self.model, &self.model_config);
+                let cost = pricing.cost(&usage);
+                self.session_cost_usd += cost;
+                self.screen.set_session_cost(self.session_cost_usd);
                 crate::metrics::append(&crate::metrics::MetricsEntry {
                     timestamp_ms: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -360,6 +374,10 @@ impl App {
                     prompt_tokens,
                     completion_tokens: completion_tokens.unwrap_or(0),
                     model: self.model.clone(),
+                    cost_usd: if cost > 0.0 { Some(cost) } else { None },
+                    cache_read_tokens,
+                    cache_write_tokens,
+                    reasoning_tokens,
                 });
                 self.screen.set_throbber(render::Throbber::Working);
                 SessionControl::Continue

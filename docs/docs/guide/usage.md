@@ -128,7 +128,7 @@ Type `/` to open the command picker. Key commands:
 | `/compact` | Summarize older history to free context |
 | `/fork`, `/branch` | Branch the current session |
 | `/export` | Copy conversation to clipboard (markdown) |
-| `/stats` | Token usage, activity heatmap |
+| `/stats` | Token usage, cost breakdown, activity heatmap |
 | `/settings` | Toggle runtime settings |
 | `/theme` | Change accent color |
 | `/color` | Set task slug color |
@@ -203,9 +203,12 @@ including:
 
 ## Stats
 
-`/stats` shows token usage metrics:
+`/stats` shows token usage and cost metrics:
 
+- Total cost (across all sessions)
 - Total calls and tokens (prompt/completion breakdown)
-- Per-model breakdown (if multiple models used)
+- Per-model breakdown with cost (if multiple models used)
 - Sparkline of hourly activity (last 24h)
 - 12-week daily activity heatmap
+
+The current session cost is also shown live in the status bar.

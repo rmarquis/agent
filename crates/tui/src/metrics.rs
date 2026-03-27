@@ -10,6 +10,15 @@ pub struct MetricsEntry {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub model: String,
+    /// Cost of this LLM call in USD. Absent in old entries.
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
+    #[serde(default)]
+    pub cache_read_tokens: Option<u32>,
+    #[serde(default)]
+    pub cache_write_tokens: Option<u32>,
+    #[serde(default)]
+    pub reasoning_tokens: Option<u32>,
 }
 
 fn metrics_path() -> PathBuf {
@@ -67,6 +76,7 @@ struct ModelStats {
     prompt: u64,
     completion: u64,
     calls: usize,
+    cost_usd: f64,
 }
 
 impl ModelStats {
@@ -79,6 +89,7 @@ struct Stats {
     total_calls: usize,
     total_prompt: u64,
     total_completion: u64,
+    total_cost_usd: f64,
     by_model: BTreeMap<String, ModelStats>,
     by_day: BTreeMap<u64, u64>,
     by_hour: BTreeMap<u64, u64>,
@@ -89,6 +100,7 @@ fn aggregate(entries: &[MetricsEntry]) -> Stats {
         total_calls: entries.len(),
         total_prompt: 0,
         total_completion: 0,
+        total_cost_usd: 0.0,
         by_model: BTreeMap::new(),
         by_day: BTreeMap::new(),
         by_hour: BTreeMap::new(),
@@ -100,18 +112,22 @@ fn aggregate(entries: &[MetricsEntry]) -> Stats {
         let prompt = e.prompt_tokens as u64;
         let completion = e.completion_tokens as u64;
         let total = prompt + completion;
+        let cost = e.cost_usd.unwrap_or(0.0);
 
         stats.total_prompt += prompt;
         stats.total_completion += completion;
+        stats.total_cost_usd += cost;
 
         let m = stats.by_model.entry(e.model.clone()).or_insert(ModelStats {
             prompt: 0,
             completion: 0,
             calls: 0,
+            cost_usd: 0.0,
         });
         m.prompt += prompt;
         m.completion += completion;
         m.calls += 1;
+        m.cost_usd += cost;
 
         *stats.by_day.entry(day_key(e.timestamp_ms)).or_insert(0) += total;
 
@@ -178,6 +194,12 @@ pub fn render_stats(entries: &[MetricsEntry]) -> StatsOutput {
     let mut right = Vec::new();
     let total = stats.total_prompt + stats.total_completion;
 
+    if stats.total_cost_usd > 0.0 {
+        left.push(StatsLine::Kv {
+            label: "total cost".into(),
+            value: engine::pricing::format_cost(stats.total_cost_usd),
+        });
+    }
     left.push(StatsLine::Kv {
         label: "calls".into(),
         value: stats.total_calls.to_string(),
@@ -215,16 +237,22 @@ pub fn render_stats(entries: &[MetricsEntry]) -> StatsOutput {
             .map(|(_, m)| fmt(m.total()).len())
             .max()
             .unwrap_or(0);
+        let show_cost = models.iter().any(|(_, m)| m.cost_usd > 0.0);
         for (model, m) in &models {
             let model_pad = max_model_len.saturating_sub(model.len()) + 2;
             let calls_str = m.calls.to_string();
             let tokens_str = fmt(m.total());
             let calls_pad = max_calls_len.saturating_sub(calls_str.len());
             let tokens_pad = max_tokens_len.saturating_sub(tokens_str.len());
+            let cost_str = if show_cost {
+                format!("    {}", engine::pricing::format_cost(m.cost_usd))
+            } else {
+                String::new()
+            };
             left.push(StatsLine::Kv {
                 label: format!("  {model}{}", " ".repeat(model_pad)),
                 value: format!(
-                    "{}{calls_str}    {}{tokens_str}",
+                    "{}{calls_str}    {}{tokens_str}{cost_str}",
                     " ".repeat(calls_pad),
                     " ".repeat(tokens_pad),
                 ),

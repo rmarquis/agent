@@ -698,14 +698,17 @@ impl<'a> Turn<'a> {
                 }
             };
 
-            if let Some(tokens) = resp.prompt_tokens {
+            if let Some(tokens) = resp.usage.prompt_tokens {
                 let tokens_per_sec = resp.tokens_per_sec;
                 if let Some(tps) = tokens_per_sec {
                     self.tps_samples.push(tps);
                 }
                 self.emit(EngineEvent::TokenUsage {
                     prompt_tokens: tokens,
-                    completion_tokens: resp.completion_tokens,
+                    completion_tokens: resp.usage.completion_tokens,
+                    cache_read_tokens: resp.usage.cache_read_tokens,
+                    cache_write_tokens: resp.usage.cache_write_tokens,
+                    reasoning_tokens: resp.usage.reasoning_tokens,
                     tokens_per_sec,
                 });
             }
